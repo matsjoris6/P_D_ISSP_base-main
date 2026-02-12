@@ -221,7 +221,6 @@ def DOA_corr(acoustic_scenario, noise_filenames, segment_duration):
     
     print(f"Geschatte TDOA: {estimated_tdoa} samples")
     print(f"Geschatte DOA:  {theta_deg:.2f} graden")
-    git remote set-url origin https://<ZIJN_TOKEN>@github.com/matsjoris6/P_D_ISSP_base-main.git
     return DOAestAll
 
 
@@ -261,4 +260,6 @@ fig = check_plot_tdoas(
 
 # 4. Toon de plot
 plt.show()
-    
+
+
+TEST = 1
