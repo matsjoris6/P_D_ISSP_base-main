@@ -25,3 +25,5 @@ plt.grid(True)
 output_file = 'mijn_rir_grafiek.png'
 plt.savefig(output_file)
 print(f"Klaar! Open nu het bestand '{output_file}' in je linker zijbalk.")
+
+test = 1

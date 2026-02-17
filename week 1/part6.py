@@ -167,8 +167,8 @@ if __name__ == "__main__":
     # 2. Laad RIRs (Links op -60, Rechts op +60)
     # Check je mapnamen: s-60 is links, s60 is rechts
     print("Laden van RIRs...")
-    rirs_left, _ = load_hmirs_for_angle(rir_folder, "s-60") 
-    rirs_right, _ = load_hmirs_for_angle(rir_folder, "s60")
+    rirs_left, _ = load_hmirs_for_angle(rir_folder, "s-90") 
+    rirs_right, _ = load_hmirs_for_angle(rir_folder, "s30")
 
     if rirs_left is not None and rirs_right is not None:
         # 3. Mixen
