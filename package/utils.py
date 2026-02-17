@@ -73,3 +73,54 @@ def create_micsigs(acoustic_scenario, speech_filenames, noise_filenames, duratio
     
     return mic, speech_component, noise_component
 
+def music_narrowband(micsigs, fs, acoustic_scenario):
+    # 1. STFT berekenen [cite: 10, 11]
+    L = 1024
+    overlap = L // 2
+    stft_list = []
+    for m in range(micsigs.shape[1]):
+        _, _, Zxx = signal.stft(micsigs[:, m], fs=fs, window='hann', nperseg=L, noverlap=overlap)
+        stft_list.append(Zxx)
+    stft_data = np.stack(stft_list, axis=0)
+    
+    M, nF, nT = stft_data.shape
+    c, d = 343.0, 0.05
+    
+    # 2. Aantal bronnen (Q) [cite: 36]
+    Q = acoustic_scenario.audioPos.shape[0] if acoustic_scenario.audioPos is not None else 0
+    
+    # 3. Frequentiebin selectie [cite: 14]
+    power_spectrum = np.mean(np.abs(stft_data)**2, axis=(0, 2))
+    max_bin_idx = np.argmax(power_spectrum[1:]) + 1 
+    freqs = np.fft.rfftfreq(2*(nF-1), 1/fs)
+    omega = 2 * np.pi * freqs[max_bin_idx]
+
+    # 4. Covariantiematrix Ryy 
+    Y = stft_data[:, max_bin_idx, :]
+    Ryy = (Y @ Y.conj().T) / nT
+    
+    # 5. Eigen-decompositie [cite: 17, 35]
+    # np.linalg.eigh sorteert van klein naar groot
+    eigvals, eigvecs = np.linalg.eigh(Ryy)
+    
+    # Noise Subspace (En) bevat de M - Q kleinste eigenvectoren [cite: 116, 117]
+    En = eigvecs[:, :M-Q] 
+    
+    # 6. Pseudospectrum berekenen [cite: 118, 121]
+    angles = np.arange(0, 180.5, 0.5)
+    rads = np.radians(angles)
+    taus = (np.arange(M).reshape(-1, 1) * d * (-np.cos(rads))) / c 
+    A = np.exp(-1j * omega * taus)
+    
+    denom = np.sum(np.abs(En.conj().T @ A)**2, axis=0)
+    pseudospectrum = 1.0 / denom
+    spectrum_db = 10 * np.log10(pseudospectrum / np.max(pseudospectrum))
+    
+    # 7. Piekdetectie [cite: 37, 40]
+    peaks_indices, _ = signal.find_peaks(spectrum_db)
+    sorted_peak_indices = peaks_indices[np.argsort(spectrum_db[peaks_indices])][-Q:]
+    estimated_doas = np.sort(angles[sorted_peak_indices])
+    
+    # Retourneer ook alle eigenwaarden (eigvals)
+    return angles, spectrum_db, estimated_doas, freqs[max_bin_idx], np.real(eigvals)
+
