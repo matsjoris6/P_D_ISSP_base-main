@@ -11,19 +11,19 @@ dry_signal_2_path = os.path.join("sound_files", "part2_track2_dry.wav")
 
 fs_sim = 44100
 c = 343.0
-d_ear = 0.013    # 1.3 cm
-d_front = 0.215  # 21.5 cm
+d_ear = 0.013    
+d_front = 0.215  
 
-folder_left = "s-30"
-folder_right = "s30"
+folder_left = "s-90"
+folder_right = "s90"
 
-# Haal de werkelijke hoeken uit de strings
+
 angle_L = abs(float(folder_left.replace("s", "")))  
 angle_R = float(folder_right.replace("s", ""))      
 
-# "Broadside" voor het frontale paar is recht vooruit (90° op de as yL1-yR1).
-# Een bron op +30° (rechts) zit op 90-30 = 60° van de as.
-# Een bron op -30° (links) zit op 90+30 = 120° van de as.
+true_front_R =  angle_R
+true_front_L = angle_L
+
 true_front_R = 90.0 - angle_R
 true_front_L = 90.0 + angle_L
 
@@ -35,6 +35,8 @@ try:
     min_len = min(len(dry_sig_1), len(dry_sig_2))
     dry_sig_1 = dry_sig_1[:min_len]
     dry_sig_2 = dry_sig_2[:min_len]
+
+
 
     yL1_rir_left, _ = sf.read(os.path.join(base_folder, folder_left, "HMIR_L1.wav"))
     yL2_rir_left, _ = sf.read(os.path.join(base_folder, folder_left, "HMIR_L2.wav"))
@@ -64,94 +66,138 @@ try:
 
     micsigs_left_ear = np.column_stack((yL1_mix, yL2_mix))
     micsigs_right_ear = np.column_stack((yR1_mix, yR2_mix))
-    micsigs_front = np.column_stack((yL1_mix, yR1_mix)) # L1 en R1 voor de grote afstand
+    micsigs_front = np.column_stack((yL1_mix, yR1_mix)) 
 
 except Exception as e:
     print(f"Fout bij het laden van audio/RIRs: {e}")
     exit()
 
 
-def music_wideband_2mics(micsigs, fs, d, Q=1):
+def MUSIC_wideband_HM(micsigs, fs, Q=2):
+  
     L = 1024
     overlap = L // 2
+    
     
     stft_list = []
     for m in range(micsigs.shape[1]):
         freqs, _, Zxx = signal.stft(micsigs[:, m], fs=fs, window='hann', nperseg=L, noverlap=overlap)
         stft_list.append(Zxx)
-    stft_data = np.stack(stft_list, axis=0)
+    stft_data = np.stack(stft_list, axis=0) 
     
     M, nF, nT = stft_data.shape
+    c = 343.0
+    
+    
+    x_ear = 0.215 / 2  
+    y_mic = 0.013 / 2  
+    
+    mics_pos = np.array([
+        [-x_ear,  y_mic],  
+        [-x_ear, -y_mic],  
+        [ x_ear,  y_mic],  
+        [ x_ear, -y_mic]   
+    ])
+    
+    px = mics_pos[:, 0].reshape(-1, 1)
+    py = mics_pos[:, 1].reshape(-1, 1)
+    
     angles = np.arange(0, 180.5, 0.5)
     rads = np.radians(angles)
     
-    mics_pos = np.array([0, d])
-    valid_indices = range(1, L // 2)
     pseudospectra = []
     
-    for k in valid_indices:
+   
+    for k in range(1, nF - 1):
+       #if freqs[k] > 2000.0:
+           #continue
         Y = stft_data[:, k, :]
         Ryy = (Y @ Y.conj().T) / nT
+        
         _, eigvecs = np.linalg.eigh(Ryy)
+   
         En = eigvecs[:, :M-Q] 
         
         omega = 2 * np.pi * freqs[k]
-        taus = (mics_pos.reshape(-1, 1) * np.cos(rads)) / c 
-        A = np.exp(-1j * omega * taus)
+        
+        
+        taus = (px * np.cos(rads) + py * np.sin(rads)) / c 
+        A = np.exp(1j * omega * taus)
         
         denom = np.sum(np.abs(En.conj().T @ A)**2, axis=0)
         pseudospectra.append(1.0 / denom)
         
+  
     pseudospectra = np.array(pseudospectra)
     p_geom = np.exp(np.mean(np.log(pseudospectra), axis=0))
     spectrum_db = 10 * np.log10(p_geom / np.max(p_geom))
     
+
     peaks_indices, _ = signal.find_peaks(spectrum_db)
     
-    if len(peaks_indices) > 0:
+    if len(peaks_indices) >= Q:
         sorted_peaks = peaks_indices[np.argsort(spectrum_db[peaks_indices])][-Q:]
         estimated_doas = np.sort(angles[sorted_peaks])
     else:
-        estimated_doas = [np.nan]
+
+        estimated_doas = angles[np.argsort(spectrum_db)[-Q:]]
         
     return angles, spectrum_db, estimated_doas
 
 
-ang_L, spec_L, est_L = music_wideband_2mics(micsigs_left_ear, fs_sim, d_ear, Q=1)
-ang_R, spec_R, est_R = music_wideband_2mics(micsigs_right_ear, fs_sim, d_ear, Q=1)
-ang_F, spec_F, est_F = music_wideband_2mics(micsigs_front, fs_sim, d_front, Q=1)
+micsigs_all_4 = np.column_stack((yL1_mix, yL2_mix, yR1_mix, yR2_mix))
 
 
-fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
+ang_4, spec_4, est_4 = MUSIC_wideband_HM(micsigs_all_4, fs_sim, Q=2)
 
-# Plot 1: Linker Oor
-ax1.plot(ang_L, spec_L, 'b-', lw=2)
-ax1.axvline(angle_L, color='g', ls='--', label=f'Waarheid (Links): {angle_L}°')
-ax1.axvline(est_L[0], color='r', ls=':', label=f'Schatting: {est_L[0]:.1f}°')
-ax1.set_title("Linker Oor (yL1, yL2) - Verwacht: Dominerende linker bron")
-ax1.set_ylabel("Mag (dB)")
-ax1.legend()
-ax1.grid(True, alpha=0.3)
+plt.figure(figsize=(10, 6))
 
-# Plot 2: Rechter Oor
-ax2.plot(ang_R, spec_R, 'b-', lw=2)
-ax2.axvline(angle_R, color='g', ls='--', label=f'Waarheid (Rechts): {angle_R}°')
-ax2.axvline(est_R[0], color='r', ls=':', label=f'Schatting: {est_R[0]:.1f}°')
-ax2.set_title("Rechter Oor (yR1, yR2) - Verwacht: Dominerende rechter bron")
-ax2.set_ylabel("Mag (dB)")
-ax2.legend()
-ax2.grid(True, alpha=0.3)
 
-# Plot 3: Frontale Mics
-ax3.plot(ang_F, spec_F, 'b-', lw=2)
-ax3.axvline(true_front_R, color='g', ls='--', label=f'Waarheid R-bron: {true_front_R}°')
-ax3.axvline(true_front_L, color='purple', ls='--', label=f'Waarheid L-bron: {true_front_L}°')
-ax3.axvline(est_F[0], color='r', ls=':', label=f'Schatting : {est_F[0]:.1f}°')
-ax3.set_title("Frontale Mics (yL1, yR1) - Verwacht: Spatiale aliasing door grote afstand (d=21.5cm)")
-ax3.set_ylabel("Mag (dB)")
-ax3.set_xlabel("Hoek (graden)")
-ax3.legend()
-ax3.grid(True, alpha=0.3)
+plt.plot(ang_4, spec_4, color='purple', linewidth=2.5, label='4-Mic Pseudospectrum $\\bar{p}(\\theta)$')
 
+
+plt.axvline(true_front_R, color='green', linestyle='--', linewidth=1.5, label=f'Waarheid Rechts: {true_front_R}°')
+plt.axvline(true_front_L, color='teal', linestyle='--', linewidth=1.5, label=f'Waarheid Links: {true_front_L}°')
+
+
+colors_est = ['red', 'orange']
+for i, e_doa in enumerate(est_4):
+
+    plt.axvline(e_doa, color=colors_est[i % 2], linestyle=':', linewidth=2, label=f'Schatting {i+1}: {e_doa:.1f}°')
+    
+ 
+    peak_idx = np.argmin(np.abs(ang_4 - e_doa))
+    plt.plot(e_doa, spec_4[peak_idx], marker="x", color=colors_est[i % 2], markersize=10, markeredgewidth=3)
+
+plt.title("Wideband MUSIC: 4-Mic Head-Mounted Array (2 Bronnen)", fontsize=14)
+plt.xlabel("Hoek (graden) [90° = Recht vooruit]", fontsize=12)
+plt.ylabel("Magnitude (dB)", fontsize=12)
+plt.xlim(0, 180)
+plt.ylim(np.min(spec_4) - 5, 5) 
+plt.grid(True, linestyle='--', alpha=0.5)
+plt.legend(loc='upper right', bbox_to_anchor=(1.0, 1.0))
 plt.tight_layout()
+
+
 plt.show()
+
+
+print("\n" + "="*50)
+print("VERGELIJKING: 4-MICROFOON ARRAY")
+print("="*50)
+print(f"Ware hoeken:        {true_front_R:.1f}° en {true_front_L:.1f}°")
+
+if len(est_4) == 2:
+    print(f"Geschatte hoeken:   {est_4[0]:.1f}° en {est_4[1]:.1f}°")
+    
+  
+    ware_hoeken = np.sort([true_front_R, true_front_L])
+    geschatte_hoeken = np.sort(est_4)
+    fouten = np.abs(ware_hoeken - geschatte_hoeken)
+    
+    print("-" * 50)
+    print(f"Foutmarge Bron 1:   {fouten[0]:.1f}°")
+    print(f"Foutmarge Bron 2:   {fouten[1]:.1f}°")
+else:
+    print(f"Let op: Het algoritme heeft slechts {len(est_4)} piek(en) gevonden: {est_4}")
+print("="*50)
