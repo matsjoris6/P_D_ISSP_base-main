@@ -7,6 +7,8 @@ from package import load_rirs, select_latest_rir
 
 def create_micsigs(acoustic_scenario, speech_filenames, noise_filenames, duration):
     fs_rir = acoustic_scenario.fs
+    if fs_rir != 44100:
+        raise ValueError(f"Fout: Sampling frequency moet 44.1 kHz zijn, maar is {fs_rir} Hz.")
     num_mics = len(acoustic_scenario.RIRs_audio[0])
     num_samples = int(duration * fs_rir)
     
@@ -45,7 +47,7 @@ def create_micsigs(acoustic_scenario, speech_filenames, noise_filenames, duratio
     if noise_filenames and len(noise_filenames) > 0 and acoustic_scenario.RIRs_noise is not None:
         for src_idx, filename in enumerate(noise_filenames):
             if not filename: continue
-            print(f" - Verwerken ruis: {filename}")
+          
             audio, fs_src = sf.read(filename)
             
             if fs_src != fs_rir:
@@ -60,6 +62,22 @@ def create_micsigs(acoustic_scenario, speech_filenames, noise_filenames, duratio
                 noise_component[:L, mic_idx] += filtered[:L]
     else:
         print("INFO: Ruis-verwerking overgeslagen (geen bestanden of geen ruis-RIRs gevonden).")
+
+    speech_mic1 = speech_component[:, 0]
+    vad = np.abs(speech_mic1) > np.std(speech_mic1) * 1e-3
+    active_speech = speech_mic1[vad]
+    Ps = np.var(active_speech) if len(active_speech) > 0 else 0
+    Pn_target = 0.1 * Ps
+    white_noise = np.random.normal(0, np.sqrt(Pn_target), (num_samples, num_mics))
+       
+    noise_component += white_noise
+    Pn_actual = np.var(noise_component[:, 0])
+    
+    if Pn_actual > 0:
+        snr_mic1 = 10 * np.log10(Ps / Pn_actual)
+        print(f"SNR in de eerste microfoon: {snr_mic1:.2f} dB")
+    else:
+        print("Kan SNR niet berekenen (Ruis is 0).")
 
     mic = speech_component + noise_component
 
@@ -218,3 +236,174 @@ def music_narrowband(micsigs, fs, acoustic_scenario):
     
     return angles, spectrum_db, estimated_doas, f_val, np.real(eigvals)
 
+def music_wideband(micsigs, fs, acoustic_scenario):
+    # 1. Efficiënte STFT berekening (Vectorized over time)
+    L = 1024
+    overlap = L // 2
+    
+    stft_list = []
+    for m in range(micsigs.shape[1]):
+        freqs, _, Zxx = signal.stft(micsigs[:, m], fs=fs, window='hann', nperseg=L, noverlap=overlap)
+        stft_list.append(Zxx)
+    stft_data = np.stack(stft_list, axis=0) # Shape: (M, nF, nT)
+    
+    M, nF, nT = stft_data.shape
+    c = 343.0
+    num_audio = acoustic_scenario.audioPos.shape[0] if acoustic_scenario.audioPos is not None else 0
+    num_noise = acoustic_scenario.noisePos.shape[0] if acoustic_scenario.noisePos is not None else 0
+    Q = num_audio + num_noise
+    angles = np.arange(0, 180.5, 0.5)
+    rads = np.radians(angles)
+    
+    # Pre-compute mic coördinaten
+    mics_centered = acoustic_scenario.micPos - np.mean(acoustic_scenario.micPos, axis=0)
+    px = mics_centered[:, 0].reshape(-1, 1)
+    py = mics_centered[:, 1].reshape(-1, 1)
+    
+    # We itereren over bins k = 2 ... L/2. 
+    # In Python (0-based) is k=1 (DC) index 0. L/2 is index 512 (Nyquist).
+    # De indices 1 t/m 511 komen exact overeen met k=2 ... L/2
+    valid_indices = range(1, L // 2)
+    pseudospectra = []
+    
+    for k in valid_indices:
+        # Signaal isoleren voor frequentie k
+        Y = stft_data[:, k, :]
+        Ryy = (Y @ Y.conj().T) / nT
+        
+        # Ruissubruimte bepalen
+        _, eigvecs = np.linalg.eigh(Ryy)
+        En = eigvecs[:, :M-Q] 
+        
+        # Steering vector bepalen
+        omega = 2 * np.pi * freqs[k]
+        taus = (px * np.sin(rads) + py * np.cos(rads)) / c 
+        A = np.exp(-1j * omega * taus)
+        
+        # Pseudospectrum P(theta)
+        denom = np.sum(np.abs(En.conj().T @ A)**2, axis=0)
+        p_theta = 1.0 / denom
+        pseudospectra.append(p_theta)
+        
+    pseudospectra = np.array(pseudospectra) # Shape: (511, len(angles))
+    
+    # 2. Geometrisch Gemiddelde (Numeriek stabiele methode) + veel minder gevoelig voor pieken die samensmelten
+    # i.p.v. p1 * p2 * .. pn tot de macht 1/N doen we: exp(mean(log(p))) want veel rekenkrachtiger
+    log_p = np.log(pseudospectra)
+    p_geom = np.exp(np.mean(log_p, axis=0))
+    
+    # Normalizeer en naar dB
+    spectrum_geom_db = 10 * np.log10(p_geom / np.max(p_geom))
+    
+    # 3. Peak Finding op het gemiddelde spectrum
+    peaks_indices, _ = signal.find_peaks(spectrum_geom_db)
+    if len(peaks_indices) >= Q:
+        sorted_peak_indices = peaks_indices[np.argsort(spectrum_geom_db[peaks_indices])][-Q:]
+        estimated_doas = np.sort(angles[sorted_peak_indices])
+    else:
+        # Fallback indien pieken samensmelten
+        sorted_all = np.argsort(spectrum_geom_db)[::-1]
+        est_idx = []
+        for idx in sorted_all:
+            if len(est_idx) == Q: break
+            if all(abs(idx - e) > 20 for e in est_idx):
+                est_idx.append(idx)
+        estimated_doas = np.sort(angles[est_idx])
+
+    # Geef de individuele genormaliseerde spectra ook mee (in dB) voor de plot
+    ps_ind_db = 10 * np.log10(pseudospectra / np.max(pseudospectra, axis=1, keepdims=True))
+
+    return angles, ps_ind_db, spectrum_geom_db, estimated_doas
+
+def das_bf(acoustic_scenario, speech_filenames, noise_filenames, duration):
+    fs = acoustic_scenario.fs
+    c = 343.0
+    
+ 
+    mic, speech_comp, noise_comp = create_micsigs(
+        acoustic_scenario, speech_filenames, noise_filenames, duration
+    )
+    
+
+    num_audio = acoustic_scenario.audioPos.shape[0] if acoustic_scenario.audioPos is not None else 0
+    num_noise = acoustic_scenario.noisePos.shape[0] if acoustic_scenario.noisePos is not None else 0
+    Q = num_audio + num_noise
+
+    
+
+    angles, ps_ind_db, spec_geo, est_doas = music_wideband(mic, fs, acoustic_scenario)
+    
+
+    target_idx = np.argmin(np.abs(est_doas - 90.0))
+    target_doa = est_doas[target_idx]
+    print(f"Target DOA: {target_doa:.1f}°")
+    
+
+    target_rad = np.radians(target_doa)
+    mics_centered = acoustic_scenario.micPos - np.mean(acoustic_scenario.micPos, axis=0)
+    px = mics_centered[:, 0]
+    py = mics_centered[:, 1]
+    
+ 
+    taus = (px * np.sin(target_rad) + py * np.cos(target_rad)) / c 
+    
+ 
+    def shift_signals(component_signals):
+        M = component_signals.shape[1]
+        N = component_signals.shape[0]
+        aligned_signals = np.zeros_like(component_signals)
+        
+        freqs = np.fft.rfftfreq(N, 1/fs)
+        
+        for m in range(M):
+       
+            sig_fft = np.fft.rfft(component_signals[:, m])
+            # + om delay ongedaan te maken
+            shifted_fft = sig_fft * np.exp(1j * 2 * np.pi * freqs * taus[m])
+
+            aligned_signals[:, m] = np.fft.irfft(shifted_fft, n=N)
+            
+
+
+        return aligned_signals 
+
+    # 1. Verschuif de componenten
+    aligned_speech = shift_signals(speech_comp)
+    aligned_noise = shift_signals(noise_comp)
+    
+    # voor gsc: Alle uitgelijnde kanalen (spraak + ruis)
+    aligned_mics = aligned_speech + aligned_noise
+    
+    # 3. optellen en schalen we  voor de DAS output
+    M_val = aligned_mics.shape[1]
+    speechDAS = np.sum(aligned_speech, axis=1) / M_val
+    noiseDAS = np.sum(aligned_noise, axis=1) / M_val
+    DASout = speechDAS + noiseDAS
+    
+    #snr berekenen
+    vad = np.abs(speech_comp[:, 0]) > np.std(speech_comp[:, 0]) * 1e-3
+    
+    Ps_das = np.var(speechDAS[vad]) if np.any(vad) else 0
+    Pn_das = np.var(noiseDAS)
+    
+    SNRoutDAS = 10 * np.log10(Ps_das / Pn_das) if Pn_das > 0 else np.nan
+    print(f"DAS Output SNR: {SNRoutDAS:.2f} dB")
+    
+
+    plt.figure(figsize=(12, 6))
+    
+    plt.subplot(2, 1, 1)
+    plt.plot(mic[:, 0], color='blue', alpha=0.7)
+    plt.title("Microfoon 1 (Ongeloofde mix)")
+    plt.ylabel("Amplitude")
+    
+    plt.subplot(2, 1, 2)
+    plt.plot(DASout, color='green', alpha=0.7)
+    plt.title(f"Delay-and-Sum Output (Georiënteerd op {target_doa:.1f}°)")
+    plt.ylabel("Amplitude")
+    plt.xlabel("Samples")
+    
+    plt.tight_layout()
+    plt.show()
+
+    return DASout, speechDAS, noiseDAS, SNRoutDAS, aligned_mics

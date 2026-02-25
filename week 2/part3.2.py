@@ -34,7 +34,9 @@ def music_wideband(micsigs, fs, acoustic_scenario):
     
     M, nF, nT = stft_data.shape
     c = 343.0
-    Q = acoustic_scenario.audioPos.shape[0] if acoustic_scenario.audioPos is not None else 1
+    num_audio = acoustic_scenario.audioPos.shape[0] if acoustic_scenario.audioPos is not None else 0
+    num_noise = acoustic_scenario.noisePos.shape[0] if acoustic_scenario.noisePos is not None else 0
+    Q = num_audio + num_noise
     
     angles = np.arange(0, 180.5, 0.5)
     rads = np.radians(angles)

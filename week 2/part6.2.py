@@ -109,8 +109,7 @@ def MUSIC_wideband_HM(micsigs, fs, Q=2):
     
    
     for k in range(1, nF - 1):
-       #if freqs[k] > 2000.0:
-           #continue
+     
         Y = stft_data[:, k, :]
         Ryy = (Y @ Y.conj().T) / nT
         

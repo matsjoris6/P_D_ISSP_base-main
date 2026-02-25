@@ -17,13 +17,11 @@ d_front = 0.215  # 21.5 cm
 folder_left = "s-30"
 folder_right = "s30"
 
-# Haal de werkelijke hoeken uit de strings
+
 angle_L = abs(float(folder_left.replace("s", "")))  
 angle_R = float(folder_right.replace("s", ""))      
 
-# "Broadside" voor het frontale paar is recht vooruit (90° op de as yL1-yR1).
-# Een bron op +30° (rechts) zit op 90-30 = 60° van de as.
-# Een bron op -30° (links) zit op 90+30 = 120° van de as.
+
 true_front_R = 90.0 - angle_R
 true_front_L = 90.0 + angle_L
 
