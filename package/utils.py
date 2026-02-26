@@ -236,7 +236,7 @@ def music_narrowband(micsigs, fs, acoustic_scenario):
     
     return angles, spectrum_db, estimated_doas, f_val, np.real(eigvals)
 
-def music_wideband(micsigs, fs, acoustic_scenario):
+def music_wideband(micsigs, fs, acoustic_scenario, Q_override=1):
     # 1. Efficiënte STFT berekening (Vectorized over time)
     L = 1024
     overlap = L // 2
@@ -249,9 +249,8 @@ def music_wideband(micsigs, fs, acoustic_scenario):
     
     M, nF, nT = stft_data.shape
     c = 343.0
-    num_audio = acoustic_scenario.audioPos.shape[0] if acoustic_scenario.audioPos is not None else 0
-    num_noise = acoustic_scenario.noisePos.shape[0] if acoustic_scenario.noisePos is not None else 0
-    Q = num_audio + num_noise
+    Q = Q_override
+    
     angles = np.arange(0, 180.5, 0.5)
     rads = np.radians(angles)
     
@@ -260,9 +259,6 @@ def music_wideband(micsigs, fs, acoustic_scenario):
     px = mics_centered[:, 0].reshape(-1, 1)
     py = mics_centered[:, 1].reshape(-1, 1)
     
-    # We itereren over bins k = 2 ... L/2. 
-    # In Python (0-based) is k=1 (DC) index 0. L/2 is index 512 (Nyquist).
-    # De indices 1 t/m 511 komen exact overeen met k=2 ... L/2
     valid_indices = range(1, L // 2)
     pseudospectra = []
     
@@ -275,7 +271,7 @@ def music_wideband(micsigs, fs, acoustic_scenario):
         _, eigvecs = np.linalg.eigh(Ryy)
         En = eigvecs[:, :M-Q] 
         
-        # Steering vector bepalen
+        # Steering vector bepalen (JOUW GEOMETRIE KLOPT VOOR JULLIE GUI!)
         omega = 2 * np.pi * freqs[k]
         taus = (px * np.sin(rads) + py * np.cos(rads)) / c 
         A = np.exp(-1j * omega * taus)
@@ -287,8 +283,7 @@ def music_wideband(micsigs, fs, acoustic_scenario):
         
     pseudospectra = np.array(pseudospectra) # Shape: (511, len(angles))
     
-    # 2. Geometrisch Gemiddelde (Numeriek stabiele methode) + veel minder gevoelig voor pieken die samensmelten
-    # i.p.v. p1 * p2 * .. pn tot de macht 1/N doen we: exp(mean(log(p))) want veel rekenkrachtiger
+    # 2. Geometrisch Gemiddelde
     log_p = np.log(pseudospectra)
     p_geom = np.exp(np.mean(log_p, axis=0))
     
@@ -301,7 +296,7 @@ def music_wideband(micsigs, fs, acoustic_scenario):
         sorted_peak_indices = peaks_indices[np.argsort(spectrum_geom_db[peaks_indices])][-Q:]
         estimated_doas = np.sort(angles[sorted_peak_indices])
     else:
-        # Fallback indien pieken samensmelten
+        # Fallback indien pieken samensmelten door galm!
         sorted_all = np.argsort(spectrum_geom_db)[::-1]
         est_idx = []
         for idx in sorted_all:
@@ -310,7 +305,7 @@ def music_wideband(micsigs, fs, acoustic_scenario):
                 est_idx.append(idx)
         estimated_doas = np.sort(angles[est_idx])
 
-    # Geef de individuele genormaliseerde spectra ook mee (in dB) voor de plot
+    # Geef de individuele genormaliseerde spectra ook mee (in dB) voor eventuele plots
     ps_ind_db = 10 * np.log10(pseudospectra / np.max(pseudospectra, axis=1, keepdims=True))
 
     return angles, ps_ind_db, spectrum_geom_db, estimated_doas
