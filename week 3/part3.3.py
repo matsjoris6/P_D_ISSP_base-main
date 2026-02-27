@@ -284,7 +284,7 @@ if __name__ == "__main__":
         speech_paths = alle_spraak_bestanden[:num_audio]
 
         # STAP 4 KEUZEMENU: 
-        gekozen_ruisbestand = "speech2.wav" 
+        gekozen_ruisbestand = "White_noise1.wav" 
         
         alle_ruis_bestanden = [
             os.path.join(parent_dir, "sound_files", gekozen_ruisbestand)
