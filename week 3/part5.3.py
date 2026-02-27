@@ -24,7 +24,7 @@ true_front_L = 90.0 + angle_L # Target spraak
 try:
     dry_sig_1, _ = sf.read(dry_signal_1_path)
     dry_sig_2, _ = sf.read(dry_signal_2_path)
-    min_len = min(len(dry_sig_1), len(dry_sig_2))
+    min_len = min(len(dry_sig_1), len(dry_sig_2),20*fs_sim)
     dry_sig_1 = dry_sig_1[:min_len]
     dry_sig_2 = dry_sig_2[:min_len]
 
@@ -69,7 +69,7 @@ pos_L2 = [-x_ear, -y_mic]
 pos_R1 = [ x_ear,  y_mic]
 pos_R2 = [ x_ear, -y_mic]
 
-
+# Arrays samenstellen
 arrays = {
     "Linkeroor (yL1, yL2)": {
         "mics": np.column_stack((yL1_mix, yL2_mix)),
@@ -89,7 +89,7 @@ arrays = {
     }
 }
 
-# Ideale VAD baseren op schone target spraak op linker hoofd-microfoon
+# Ideale VAD baseren we op de schone target spraak op de linker hoofd-microfoon
 vad = np.abs(yL1_from_left) > (np.std(yL1_from_left) * 1e-3)
 
 
@@ -159,7 +159,7 @@ def gsc_head_mounted(micsigs, mics_pos, target_doa, fs, vad):
     if Pn_in < 1e-10: Pn_in = 1e-10
     SNRin = 10 * np.log10(Ps_in / Pn_in)
     
-    return GSCout, SNRout, SNRin, noise_refs
+    return GSCout, SNRout, SNRin
 
 
 print(f"\nTarget DOA ingesteld op: {true_front_L}° (Linker Bron)")
@@ -171,44 +171,53 @@ t = np.arange(len(yL1_mix)) / fs_sim
 plt.figure(figsize=(14, 8))
 
 for i, (name, data) in enumerate(arrays.items()):
-    
-    GSCout, SNRout, SNRin, noise_refs = gsc_head_mounted(
+    print(f"GSC berekenen voor: {name}...")
+    GSCout, SNRout, SNRin = gsc_head_mounted(
         micsigs=data["mics"], 
         mics_pos=data["pos"], 
         target_doa=true_front_L, 
         fs=fs_sim, 
         vad=vad
     )
-    
     results[name] = {"out": GSCout, "snr": SNRout, "snr_in": SNRin}
-    print(f"  -> Input SNR:  {SNRin:.2f} dB | Output SNR: {SNRout:.2f} dB")
+    print(f"  -> Input SNR:  {SNRin:.2f} dB")
+    print(f"  -> Output SNR: {SNRout:.2f} dB\n")
     
-    # 2. AUDIO EXPORT (Direct in de lus)
-    clean_name = name.replace(" ", "_").replace("(", "").replace(")", "")
-    
-    # GSC Resultaat (Het gefilterde geluid)
-    out_norm = GSCout / (np.max(np.abs(GSCout)) + 1e-9)
-    sf.write(f"Resultaat_GSC_{clean_name}.wav", out_norm, fs_sim)
-    
-    # CHECK 3: Lekkage (Wat gaat er het filter in?)
-    # We pakken de eerste ruisreferentie uit de Blocking Matrix
-    lekkage = noise_refs[:, 0]
-    lekkage_norm = lekkage / (np.max(np.abs(lekkage)) + 1e-9)
-    sf.write(f"Check3_Lekkage_{clean_name}.wav", lekkage_norm, fs_sim)
-    
-    # 3. PLOTTEN
+    # Plotten voor visuele vergelijking
     plt.subplot(4, 1, i+1)
-    plt.plot(t, data["mics"][:, 0], color='gray', alpha=0.5, label='Input (Mic 1)')
-    plt.plot(t, GSCout, color='green' if '4' in name else 'blue', alpha=0.8, label=f'GSC Output')
-    plt.title(f"{name} | Netto: {(SNRout - SNRin):.2f} dB")
+    plt.plot(t, data["mics"][:, 0], color='gray', alpha=0.5, label='Mic 1 (Onbewerkt)')
+    plt.plot(t, GSCout, color='green' if '4' in name else 'blue', alpha=0.8, 
+             label=f'GSC Output (SNR: {SNRout:.1f} dB)')
+    plt.title(f"{name} | Netto Winst: {(SNRout - SNRin):.1f} dB")
+    plt.ylabel("Amplitude")
     plt.legend(loc="upper right")
     plt.grid(True, alpha=0.3)
-
-# Referentie opslaan
-ref_mic = yL1_mix / (np.max(np.abs(yL1_mix)) + 1e-9)
-sf.write("Referentie_MicL1.wav", ref_mic, fs_sim)
 
 plt.xlabel("Tijd (s)")
 plt.tight_layout()
 plt.show()
+
+
+
+# 1. Sla de GSC resultaten op per array-configuratie
+for name, data in results.items():
+    audio_data = data["out"]
+    
+    # Normaliseren naar -1 en 1 om 'clipping' te voorkomen
+    max_val = np.max(np.abs(audio_data))
+    if max_val > 0:
+        audio_norm = audio_data / max_val
+    else:
+        audio_norm = audio_data
+
+    # Bestandsnaam opschonen (geen spaties of haakjes)
+    clean_name = name.replace(" ", "_").replace("(", "").replace(")", "")
+    filename = f"Luister_GSC_{clean_name}.wav"
+    
+    sf.write(filename, audio_norm, fs_sim)
+
+
+# 2. Sla een referentie op (onbewerkt signaal op het Linkeroor)
+ref_mic = yL1_mix / np.max(np.abs(yL1_mix))
+sf.write("Luister_Referentie_MicL1.wav", ref_mic, fs_sim)
 
