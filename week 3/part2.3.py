@@ -10,7 +10,7 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
 from package import load_rirs
-from package.utils import create_micsigs
+from package.utils import create_micsigs_modified
 from package.utils import music_wideband
 
 def das_bf(acoustic_scenario, speech_filenames, noise_filenames, duration):
@@ -18,7 +18,7 @@ def das_bf(acoustic_scenario, speech_filenames, noise_filenames, duration):
     c = 343.0
     
  
-    mic, speech_comp, noise_comp = create_micsigs(
+    mic, speech_comp, noise_comp = create_micsigs_modified(
         acoustic_scenario, speech_filenames, noise_filenames, duration
     )
     

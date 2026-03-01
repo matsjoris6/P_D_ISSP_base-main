@@ -14,7 +14,6 @@ from package import load_rirs
 from package.utils import create_micsigs as original_create_micsigs
 from package.utils import music_wideband
 
-
 def modified_create_micsigs(scenario, speech_paths, noise_paths=None, duration=10.0):
     if noise_paths is None:
         noise_paths = []
@@ -22,16 +21,8 @@ def modified_create_micsigs(scenario, speech_paths, noise_paths=None, duration=1
     if scenario.fs != 44100:
         raise ValueError(f"Fout: De samplingfrequentie is {scenario.fs} Hz. Dit moet 44.1 kHz zijn!")
 
-    # Tijdelijk de terminal-output blokkeren om de verwarrende 'INFO' waarschuwing te verbergen
-    old_stdout = sys.stdout
-    sys.stdout = open(os.devnull, 'w')
-    try:
-        _, speech, _ = original_create_micsigs(scenario, speech_paths, [], duration=duration)
-    finally:
-        sys.stdout.close()
-        sys.stdout = old_stdout  # Terminal output weer aanzetten
+    _, speech, _ = original_create_micsigs(scenario, speech_paths, [], duration=duration)
     
-    # Ruis inladen met RIRs
     if len(noise_paths) > 0:
         _, _, gui_noise = original_create_micsigs(scenario, speech_paths, noise_paths, duration=duration)
     else:
@@ -40,12 +31,12 @@ def modified_create_micsigs(scenario, speech_paths, noise_paths=None, duration=1
     vad = np.abs(speech[:, 0]) > (np.std(speech[:, 0]) * 1e-3)
     Ps = np.var(speech[vad == 1, 0])
     
-    # We gebruiken uitsluitend de gelokaliseerde ruis uit de GUI
-    noise = gui_noise
-    mic = speech + noise
+    white_noise_power = 0.10 * Ps
+    white_noise = np.random.randn(*speech.shape) * np.sqrt(white_noise_power)
+    noise = white_noise + gui_noise
     
+    mic = speech + noise
     Pn = np.var(noise[:, 0])
-    if Pn < 1e-10: Pn = 1e-10 
     SNR_in = 10 * np.log10(Ps / Pn)
     
     print(f"[Info] Input SNR (Microfoon 1): {SNR_in:.2f} dB")

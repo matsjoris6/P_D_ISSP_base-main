@@ -14,8 +14,8 @@ c = 343.0
 d_ear = 0.013    
 d_front = 0.215  
 
-folder_left = "s-90"
-folder_right = "s90"
+folder_left = "s-30"
+folder_right = "s30"
 
 
 angle_L = abs(float(folder_left.replace("s", "")))  

@@ -13,6 +13,7 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
 from package import load_rirs
+from package.utils import music_wideband
 from package.utils import create_micsigs as original_create_micsigs
 
 # ==========================================
@@ -47,66 +48,6 @@ def modified_create_micsigs(scenario, speech_paths, noise_paths=None, duration=1
     
     return mic, speech, noise, SNR_in, vad
 
-# ==========================================
-# 2. FUNCTIE: MUSIC WIDEBAND
-# ==========================================
-def music_wideband(micsigs, fs, acoustic_scenario, Q_override=1):
-    L = 1024
-    overlap = L // 2
-    
-    stft_list = []
-    for m in range(micsigs.shape[1]):
-        freqs, _, Zxx = signal.stft(micsigs[:, m], fs=fs, window='hann', nperseg=L, noverlap=overlap)
-        stft_list.append(Zxx)
-    stft_data = np.stack(stft_list, axis=0) 
-    
-    M, nF, nT = stft_data.shape
-    c = 343.0
-    Q = Q_override
-    
-    angles = np.arange(0, 180.5, 0.5)
-    rads = np.radians(angles)
-    
-    mics_centered = acoustic_scenario.micPos - np.mean(acoustic_scenario.micPos, axis=0)
-    px = mics_centered[:, 0].reshape(-1, 1)
-    py = mics_centered[:, 1].reshape(-1, 1)
-    
-    valid_indices = range(1, L // 2)
-    pseudospectra = []
-    
-    for k in valid_indices:
-        Y = stft_data[:, k, :]
-        Ryy = (Y @ Y.conj().T) / nT
-        
-        _, eigvecs = np.linalg.eigh(Ryy)
-        En = eigvecs[:, :M-Q] 
-        
-        omega = 2 * np.pi * freqs[k]
-        taus = (px * np.sin(rads) + py * np.cos(rads)) / c 
-        A = np.exp(-1j * omega * taus)
-        
-        denom = np.sum(np.abs(En.conj().T @ A)**2, axis=0)
-        pseudospectra.append(1.0 / denom)
-        
-    pseudospectra = np.array(pseudospectra)
-    log_p = np.log(pseudospectra)
-    p_geom = np.exp(np.mean(log_p, axis=0))
-    spectrum_geom_db = 10 * np.log10(p_geom / np.max(p_geom))
-    
-    peaks_indices, _ = signal.find_peaks(spectrum_geom_db)
-    if len(peaks_indices) >= Q:
-        sorted_peak_indices = peaks_indices[np.argsort(spectrum_geom_db[peaks_indices])][-Q:]
-        estimated_doas = np.sort(angles[sorted_peak_indices])
-    else:
-        sorted_all = np.argsort(spectrum_geom_db)[::-1]
-        est_idx = []
-        for idx in sorted_all:
-            if len(est_idx) == Q: break
-            if all(abs(idx - e) > 20 for e in est_idx):
-                est_idx.append(idx)
-        estimated_doas = np.sort(angles[est_idx])
-
-    return angles, spectrum_geom_db, estimated_doas
 
 # ==========================================
 # 3. FUNCTIE: DAS BEAMFORMER 
@@ -122,7 +63,7 @@ def das_bf(scenario, speech_paths, noise_paths=None, duration=10.0, show_plot=Fa
     Q = num_audio + num_noise
     if Q == 0: Q = 1
     
-    _, _, est_doas = music_wideband(mic, scenario.fs, scenario, Q_override=Q)
+    _, _, _, est_doas = music_wideband(mic, scenario.fs, scenario)
 
     target_doa = est_doas[np.argmin(np.abs(est_doas - 90.0))]
     print(f"[DAS BF] Target bron gedetecteerd op: {target_doa:.1f}°")
@@ -279,12 +220,12 @@ if __name__ == "__main__":
 
         alle_spraak_bestanden = [
             os.path.join(parent_dir, "sound_files", "speech1.wav"),
-            os.path.join(parent_dir, "sound_files", "speech2.wav")
+         
         ]
         speech_paths = alle_spraak_bestanden[:num_audio]
 
         # STAP 4 KEUZEMENU: 
-        gekozen_ruisbestand = "White_noise1.wav" 
+        gekozen_ruisbestand = "Babble_noise1.wav" 
         
         alle_ruis_bestanden = [
             os.path.join(parent_dir, "sound_files", gekozen_ruisbestand)

@@ -10,7 +10,7 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
 from package import load_rirs
-from package.utils import create_micsigs
+from package.utils import create_micsigs_modified
 
 
 
@@ -29,6 +29,6 @@ noise_files = [os.path.join("sound_files", "Babble_noise1.wav")]
 
 
 duration = 5.0
-micsigs, speech_comp, noise_comp = create_micsigs(acoustic_scenario, speech_files, noise_files, duration)
+micsigs, speech_comp, noise_comp = create_micsigs_modified(acoustic_scenario, speech_files, noise_files, duration)
 
 
