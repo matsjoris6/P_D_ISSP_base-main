@@ -61,7 +61,7 @@ def das_bf(scenario, speech_paths, noise_paths=None, duration=10.0):
     # Kies de DOA die het dichtst bij 90 graden ligt
     target_doa = est_doas[np.argmin(np.abs(est_doas - 90.0))]
     print(f"[DAS BF] Target bron gedetecteerd door MUSIC op: {target_doa:.1f}°")
-
+   
     target_rad = np.radians(target_doa)
     c = 343.0
     mics_centered = scenario.micPos - np.mean(scenario.micPos, axis=0)
@@ -110,7 +110,7 @@ def gsc_td(scenario, speech_paths, noise_paths=None, duration=10.0):
     for i in range(M_mics - 1):
         B[i, 0] = 1
         B[i, i + 1] = -1
-        
+    print(B)    
     noise_refs = (B @ aligned_mic.T).T  
 
     L = 1024
@@ -151,6 +151,8 @@ def gsc_td(scenario, speech_paths, noise_paths=None, duration=10.0):
     
     SNRoutGSC = 10 * np.log10(Ps_gsc / Pn_gsc)
     print(f"[GSC] Output SNR: {SNRoutGSC:.2f} dB (Netto Verbetering vs Mic1: {SNRoutGSC - snr_in:.2f} dB)")
+
+    
 
     # Alles plotten in 1 mooie, transparante grafiek
     t = np.arange(N_samples) / scenario.fs

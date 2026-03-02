@@ -11,8 +11,8 @@ dry_signal_2_path = os.path.join("sound_files", "part2_track2_dry.wav")
 
 fs_sim = 44100
 c = 343.0
-d_ear = 0.013    # 1.3 cm
-d_front = 0.215  # 21.5 cm
+d_ear = 0.013    
+d_front = 0.215  
 
 folder_left = "s-30"
 folder_right = "s30"
@@ -53,13 +53,10 @@ except Exception as e:
     print(f"Fout bij het laden van audio/RIRs: {e}")
     exit()
 
-# VAD baseren op schone spraak (Oracle VAD)
 vad = np.abs(yL1_from_left) > (np.std(yL1_from_left) * 1e-3)
 
-# ==========================================
-# 2. MUSIC FUNCTIES (Vanuit jouw code)
-# ==========================================
-def music_wideband_2mics(micsigs, fs, d, Q=1):
+
+def music_wideband_2mics(micsigs, fs, d, Q=1, orientation="x"):
     L = 1024
     overlap = L // 2
     stft_list = []
@@ -82,7 +79,10 @@ def music_wideband_2mics(micsigs, fs, d, Q=1):
         _, eigvecs = np.linalg.eigh(Ryy)
         En = eigvecs[:, :M-Q] 
         omega = 2 * np.pi * freqs[k]
-        taus = (mics_pos.reshape(-1, 1) * np.cos(rads)) / c 
+        if orientation == "x":
+            taus = (mics_pos.reshape(-1, 1) * np.cos(rads)) / c 
+        else:
+            taus = (mics_pos.reshape(-1, 1) * np.sin(rads)) / c 
         A = np.exp(-1j * omega * taus)
         denom = np.sum(np.abs(En.conj().T @ A)**2, axis=0)
         pseudospectra.append(1.0 / denom)
@@ -145,25 +145,27 @@ def MUSIC_wideband_HM(micsigs, fs, Q=2):
         estimated_doas = angles[np.argsort(spectrum_db)[-Q:]]
     return angles, spectrum_db, estimated_doas
 
-# ==========================================
-# 3. UNIVERSELE GSC FUNCTIE (1D en 2D)
-# ==========================================
-def gsc_universal(micsigs, target_doa, fs, vad, is_1d_array=True, d=0.013):
+
+def gsc_universal(micsigs, target_doa, fs, vad, is_1d_array=True, d=None, orientation="x"):
     N_samples, M_mics = micsigs.shape
     target_rad = np.radians(target_doa)
     
-    # Vertragingen berekenen afhankelijk van array type
+    # Vertragingen berekenen 
     if is_1d_array:
-        # Voor 2-mic arrays: simuleer een 1D as zodat het overeenkomt met de 1D MUSIC
+        
         mics_pos = np.array([0, d])
-        taus = (mics_pos * np.cos(target_rad)) / c
+        if orientation == "x":
+            taus = (mics_pos * np.cos(target_rad)) / c
+        else:
+            taus = (mics_pos * np.sin(target_rad)) / c
+
     else:
-        # Voor de 4-mic array: gebruik de echte 2D posities (zoals de 2D MUSIC verwacht)
+        
         x_ear = 0.215 / 2  
         y_mic = 0.013 / 2  
         mics_pos = np.array([[-x_ear, y_mic], [-x_ear, -y_mic], [x_ear, y_mic], [x_ear, -y_mic]])
         mics_centered = mics_pos - np.mean(mics_pos, axis=0)
-        # Gebruik sin/cos conventie passend bij MUSIC_wideband_HM
+        
         taus = (mics_centered[:, 0] * np.cos(target_rad) + mics_centered[:, 1] * np.sin(target_rad)) / c
 
     # Delay and Sum
@@ -172,13 +174,16 @@ def gsc_universal(micsigs, target_doa, fs, vad, is_1d_array=True, d=0.013):
     f = np.fft.rfftfreq(N_samples, 1/fs)
     for m in range(M_mics):
         Sig = np.fft.rfft(micsigs[:, m])
-        # Let op teken conventie: we houden het consistent met vertraging oplossen
         Sig_aligned = Sig * np.exp(-1j * 2 * np.pi * f * taus[m])
         t_aligned = np.fft.irfft(Sig_aligned, n=N_samples)
         aligned_mic[:, m] = t_aligned
         DASout += t_aligned
     DASout /= M_mics
 
+    Pn_das = np.var(DASout[vad == 0])
+    Psn_das = np.var(DASout[vad == 1])
+    Ps_das = Psn_das - Pn_das
+    SNR_das = 10 * np.log10(max(Ps_das, 1e-10) / max(Pn_das, 1e-10))
     # Blocking Matrix
     B = np.zeros((M_mics - 1, M_mics))
     for i in range(M_mics - 1):
@@ -254,58 +259,62 @@ def gsc_universal(micsigs, target_doa, fs, vad, is_1d_array=True, d=0.013):
     if Pn_in < 1e-10: Pn_in = 1e-10
     SNRin = 10 * np.log10(Ps_in / Pn_in)
     
-    return GSCout, SNRout, SNRin
+    return GSCout, SNRout, SNRin, DASout, SNR_das
 
-# ==========================================
-# 4. UITVOERING
-# ==========================================
-print("--- DOA Schattingen en GSC filtering ---")
+
+
 
 # Data combinaties
 arrays = {
-    "Linkeroor (2 mic)":   {"mics": np.column_stack((yL1_mix, yL2_mix)), "1d": True, "d": d_ear},
-    "Rechteroor (2 mic)":  {"mics": np.column_stack((yR1_mix, yR2_mix)), "1d": True, "d": d_ear},
-    "Frontaal (2 mic)":    {"mics": np.column_stack((yL1_mix, yR1_mix)), "1d": True, "d": d_front},
-    "Alle 4 Mics":         {"mics": np.column_stack((yL1_mix, yL2_mix, yR1_mix, yR2_mix)), "1d": False, "d": 0}
+    "Linkeroor (2 mic)":   {"mics": np.column_stack((yL1_mix, yL2_mix)), "1d": True, "d": d_ear,"orientation": "y"},
+    "Rechteroor (2 mic)":  {"mics": np.column_stack((yR1_mix, yR2_mix)), "1d": True, "d": d_ear,"orientation": "y"},
+    "Frontaal (2 mic)":    {"mics": np.column_stack((yL1_mix, yR1_mix)), "1d": True, "d": d_front, "orientation": "x"},
+    "Alle 4 Mics":         {"mics": np.column_stack((yL1_mix, yL2_mix, yR1_mix, yR2_mix)), "1d": False, "d": 0, "orientation": "2d"}
 }
 
 results = {}
 
 for name, config in arrays.items():
     micsigs = config["mics"]
-    
-    # 1. DOA Schatting
+    orientation= config["orientation"]
+   
     if config["1d"]:
-        _, _, est_doas = music_wideband_2mics(micsigs, fs_sim, config["d"], Q=1)
-        # Kies de DOA met de hoogste piek (die MUSIC heeft gevonden)
+        _, _, est_doas = music_wideband_2mics(micsigs, fs_sim, config["d"], Q=1,orientation=orientation)
+         
         target_doa = est_doas[0]
         print(f"\n[{name}] MUSIC 1D Schatting: {target_doa:.1f}°")
     else:
         _, _, est_doas = MUSIC_wideband_HM(micsigs, fs_sim, Q=2)
-       
+        #doa dichtste bij bron
         target_doa = est_doas[np.argmax(est_doas)] 
         print(f"\n[{name}] MUSIC 2D Schattingen: {est_doas}. We kiezen Target DOA: {target_doa:.1f}°")
 
-    # 2. GSC Toepassen met de gevonden DOA
-    GSCout, SNRout, SNRin = gsc_universal(
+    
+    GSCout, SNRout, SNRin, DAS_signal,SNRdas = gsc_universal(
         micsigs=micsigs,
         target_doa=target_doa,
         fs=fs_sim,
         vad=vad,
         is_1d_array=config["1d"],
-        d=config["d"]
+        d=config["d"],
+        orientation=orientation
     )
     
-    results[name] = {"out": GSCout, "snr_in": SNRin, "snr_out": SNRout}
+    results[name] = {"out": GSCout, "snr_in": SNRin, "snr_out": SNRout, "das": DAS_signal, "snr_das": SNRdas}
     print(f"  -> Input SNR:  {SNRin:.2f} dB")
+    print(f"  -> DAS SNR:     {SNRdas:.2f} dB (Winst: {SNRdas - SNRin:.2f} dB)")
     print(f"  -> Output SNR: {SNRout:.2f} dB (Winst: {SNRout - SNRin:.2f} dB)")
 
-# Plot de signalen
+# Plot 
 t = np.arange(len(yL1_mix)) / fs_sim
 plt.figure(figsize=(14, 10))
 for i, (name, res) in enumerate(results.items()):
     plt.subplot(4, 1, i+1)
+    #origineel
     plt.plot(t, arrays[name]["mics"][:, 0], color='gray', alpha=0.5, label='Mic 1')
+    #  DAS 
+    plt.plot(t, res["das"], color='green', alpha=0.6, label='Alleen DAS Beamformer')
+    #gsc
     plt.plot(t, res["out"], color='blue', alpha=0.8, label=f'GSC (SNR: {res["snr_out"]:.1f} dB)')
     plt.title(f"{name} | Winst: {res['snr_out'] - res['snr_in']:.1f} dB")
     plt.legend(loc='upper right')
