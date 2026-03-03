@@ -304,24 +304,36 @@ def music_narrowband(micsigs, fs, acoustic_scenario):
     
     return angles, spectrum_db, estimated_doas, f_val, np.real(eigvals)
 
-def music_wideband(micsigs, fs, acoustic_scenario):
+def music_wideband(micsigs, fs, acoustic_scenario, Q_override=None):
     # 1. Efficiënte STFT berekening (Vectorized over time)
-    L = 1024
-    overlap = L // 2
+    L = 1024    # tunen parameter: lengte van FFT en venster
+    overlap = L // 2       # tunen parameter: aantal overlappende samples
+    
+    # Tuning: Square-root Hanning window in plaats van standaard 'hann'
+    window = np.sqrt(signal.windows.hann(L, sym=False))
     
     stft_list = []
     for m in range(micsigs.shape[1]):
-        freqs, _, Zxx = signal.stft(micsigs[:, m], fs=fs, window='hann', nperseg=L, noverlap=overlap)
+        freqs, _, Zxx = signal.stft(micsigs[:, m], fs=fs, window=window, nperseg=L, noverlap=overlap) 
         stft_list.append(Zxx)
     stft_data = np.stack(stft_list, axis=0) # Shape: (M, nF, nT)
     
     M, nF, nT = stft_data.shape
     c = 343.0
-    num_audio = acoustic_scenario.audioPos.shape[0] if acoustic_scenario.audioPos is not None else 0
-    num_noise = acoustic_scenario.noisePos.shape[0] if acoustic_scenario.noisePos is not None else 0
-    Q = num_audio + num_noise
+    
+    # =========================================================================
+    # TUNING: Aantal bronnen (Q)
+    # =========================================================================
+    if Q_override is not None:
+        Q = Q_override
+    else:
+        num_audio = acoustic_scenario.audioPos.shape[0] if acoustic_scenario.audioPos is not None else 0
+        num_noise = acoustic_scenario.noisePos.shape[0] if acoustic_scenario.noisePos is not None else 0
+        Q = num_audio + num_noise
     print('Q =', Q)
-    angles = np.arange(0, 180.5, 0.5)
+    
+    step_size = 0.1 # TUNING: stapgrootte als aparte variabele voor de fallback berekening verderop
+    angles = np.arange(0, 180.5, step_size)    
     rads = np.radians(angles)
     
     # Pre-compute mic coördinaten
@@ -329,11 +341,19 @@ def music_wideband(micsigs, fs, acoustic_scenario):
     px = mics_centered[:, 0].reshape(-1, 1)
     py = mics_centered[:, 1].reshape(-1, 1)
     
-    # We itereren over bins k = 2 ... L/2. 
-    # In Python (0-based) is k=1 (DC) index 0. L/2 is index 512 (Nyquist).
-    # De indices 1 t/m 511 komen exact overeen met k=2 ... L/2
-    valid_indices = range(1, L // 2)
-    pseudospectra = []
+    # =========================================================================
+    # TUNING: Frequentiebin-selectie voor MUSIC
+    # =========================================================================
+    f_min = 300   # Minimale frequentie in Hz (Tuning parameter)
+    f_max = 4000  # Maximale frequentie in Hz (Tuning parameter)
+    
+    k_min = int(f_min / (fs / L))
+    k_max = int(f_max / (fs / L))
+    
+    valid_indices = range(max(1, k_min), min(L // 2, k_max))
+    # =========================================================================
+    
+    pseudospectra = [] # FIX: Deze initialisatie ontbrak in jouw originele code!
     
     for k in valid_indices:
         # Signaal isoleren voor frequentie k
@@ -351,13 +371,12 @@ def music_wideband(micsigs, fs, acoustic_scenario):
         
         # Pseudospectrum P(theta)
         denom = np.sum(np.abs(En.conj().T @ A)**2, axis=0)
-        p_theta = 1.0 / denom
+        p_theta = 1.0 / (denom + 1e-12) # FIX: + 1e-12 om eventuele deling door nul te voorkomen
         pseudospectra.append(p_theta)
         
-    pseudospectra = np.array(pseudospectra) # Shape: (511, len(angles))
+    pseudospectra = np.array(pseudospectra) # Shape: (aantal_bins, len(angles))
     
     # 2. Geometrisch Gemiddelde (Numeriek stabiele methode) + veel minder gevoelig voor pieken die samensmelten
-    # i.p.v. p1 * p2 * .. pn tot de macht 1/N doen we: exp(mean(log(p))) want veel rekenkrachtiger
     log_p = np.log(pseudospectra)
     p_geom = np.exp(np.mean(log_p, axis=0))
     
@@ -370,12 +389,21 @@ def music_wideband(micsigs, fs, acoustic_scenario):
         sorted_peak_indices = peaks_indices[np.argsort(spectrum_geom_db[peaks_indices])][-Q:]
         estimated_doas = np.sort(angles[sorted_peak_indices])
     else:
-        # Fallback indien pieken samensmelten
+        # =========================================================================
+        # TUNING: Peak Finding (find_peaks) Fallback logica
+        # =========================================================================
+        # In plaats van het getal '20', baseren we de minimale afstand nu op graden.
+        # Bij een step_size van 0.1 was 20 indexen slechts 2 graden afstand. 
+        # Door min_dist_deg aan te passen bepaal je de werkelijke resolutie.
+        
+        min_dist_deg = 10.0 # TUNING PARAMETER: Minimale afstand tussen twee bronnen in graden
+        idx_threshold = int(min_dist_deg / step_size)
+        
         sorted_all = np.argsort(spectrum_geom_db)[::-1]
         est_idx = []
         for idx in sorted_all:
             if len(est_idx) == Q: break
-            if all(abs(idx - e) > 20 for e in est_idx):
+            if all(abs(idx - e) > idx_threshold for e in est_idx):
                 est_idx.append(idx)
         estimated_doas = np.sort(angles[est_idx])
 
@@ -476,3 +504,47 @@ def das_bf(acoustic_scenario, speech_filenames, noise_filenames, duration):
     plt.show()
 
     return DASout, speechDAS, noiseDAS, SNRoutDAS, aligned_mics
+
+import numpy as np
+
+def compute_sir(y, x1, x2, groundTruth):
+    """
+    Compute the signal-to-interference ratio for two sources (one target source
+    and one interfering source). The script takes into account possible
+    switches between which source is the target and which one is the
+    interference. The script assumes there is access to each source's
+    contribution in the beamformer output.
+
+    Parameters
+    ----------
+    -y : [N x 1] np.ndarray[float]
+        Actual beamformer output signal (`N` is the number of samples).
+    -x1 : [N x 1] np.ndarray[float]
+        Beamformer output attributed to source 1.
+    -x2 : [N x 1] np.ndarray[float]
+        Beamformer output attributed to source 2.
+    -groundTruth : [N x 1] np.ndarray[int (0 or 1) or float (0. or 1.)]
+        Array indicating, for each sample,
+        which source is the target: 1=x1, 0=x2.
+
+    Returns
+    -------
+    -sir : 
+    """
+    # Sanity check (check whether `y = x1 + x2` based on RMSE of residual)
+    if np.sqrt(np.sum((y - x1 - x2) ** 2)) / np.sqrt(np.sum(y ** 2)) > 0.01:
+        print('/!\ Something is wrong, `y` should be the sum of `x1` and `x2`.')  
+        print('SIR can not be computed -- Returning NaN.')  
+        sir = np.nan
+    # Input check
+    elif np.sum(groundTruth) + np.sum(1 - groundTruth) != len(groundTruth):
+        print('/!\ `groundTruth` vector is not binary.')
+        print('SIR can not be computed')  
+        sir = np.nan
+    else:
+        sir = 10 * np.log10(
+            np.var(x1 * groundTruth + x2 * (1 - groundTruth)) /\
+                np.var(x2 * groundTruth + x1 * (1 - groundTruth))
+        )
+
+    return sir

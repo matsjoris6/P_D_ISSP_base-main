@@ -205,19 +205,38 @@ def plot_fd_gsc_verification(mic, gsc_out_td, fs, snr_in, snr_out, angles_music,
     ax1.legend(loc='upper right')
     ax1.grid(True, alpha=0.3)
 
+    # 2 & 3. Spectrograms met gelijk kleurenschema
+    # Bereken beide spectrogrammen eerst
+    f1, t1, Sxx1 = signal.spectrogram(mic[:len(gsc_out_td), 0], fs=fs, nperseg=1024, noverlap=512)
+    f2, t2, Sxx2 = signal.spectrogram(gsc_out_td, fs=fs, nperseg=1024, noverlap=512)
+    
+    # Converteer naar dB schaal
+    Sxx1_dB = 10 * np.log10(Sxx1 + 1e-10)
+    Sxx2_dB = 10 * np.log10(Sxx2 + 1e-10)
+    
+    # Bepaal gemeenschappelijke min/max voor beide spectrogrammen
+    vmin = min(np.min(Sxx1_dB), np.min(Sxx2_dB))
+    vmax = max(np.max(Sxx1_dB), np.max(Sxx2_dB))
+    
     # 2. Spectrogram: Input (Mic 1)
     ax2 = plt.subplot(3, 2, 3)
-    ax2.specgram(mic[:len(gsc_out_td), 0], NFFT=1024, Fs=fs, noverlap=512, cmap='inferno')
+    im1 = ax2.pcolormesh(t1, f1, Sxx1_dB, shading='auto', cmap='inferno', vmin=vmin, vmax=vmax)
+    cbar1 = plt.colorbar(im1, ax=ax2)
+    cbar1.set_label('Power (dB)')
     ax2.set_title('2A. Spectrogram: Originele Input (Mic 1)')
     ax2.set_xlabel('Tijd (s)')
     ax2.set_ylabel('Frequentie (Hz)')
+    ax2.set_ylim(0, fs/2)
 
     # 3. Spectrogram: FD-GSC Output
     ax3 = plt.subplot(3, 2, 4)
-    ax3.specgram(gsc_out_td, NFFT=1024, Fs=fs, noverlap=512, cmap='inferno')
+    im2 = ax3.pcolormesh(t2, f2, Sxx2_dB, shading='auto', cmap='inferno', vmin=vmin, vmax=vmax)
+    cbar2 = plt.colorbar(im2, ax=ax3)
+    cbar2.set_label('Power (dB)')
     ax3.set_title('2B. Spectrogram: FD-GSC Output (Let op ruisonderdrukking)')
     ax3.set_xlabel('Tijd (s)')
     ax3.set_ylabel('Frequentie (Hz)')
+    ax3.set_ylim(0, fs/2)
 
     # 4. MUSIC DOA Spectrum
     ax4 = plt.subplot(3, 1, 3)
@@ -268,7 +287,7 @@ if __name__ == "__main__":
         num_noise = scenario.noisePos.shape[0] if (hasattr(scenario, 'noisePos') and scenario.noisePos is not None) else 0
 
         speech_paths = [os.path.join(parent_dir, "sound_files", "speech1.wav")][:num_audio]
-        noise_paths = [os.path.join(parent_dir, "sound_files", "Babble_noise1.wav")][:num_noise]
+        noise_paths = [os.path.join(parent_dir, "sound_files", "speech2.wav")][:num_noise]
 
         print("\n" + "="*50)
         print("START FREQUENCY-DOMAIN GSC (DOA-Informed & LUT-based)")

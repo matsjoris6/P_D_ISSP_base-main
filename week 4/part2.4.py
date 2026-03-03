@@ -23,33 +23,63 @@ part1_4 = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(part1_4)
 
 # ==========================================
-# FUNCTION: COMPUTE SIR (Signal-to-Interference Ratio)
+# FUNCTION: COMPUTE SIR (Officiële Universiteit Functie)
 # ==========================================
-def compute_sir_metric(target_signal, interferer_signal):
+def compute_sir(y, x1, x2, groundTruth):
     """
-    Berekent de SIR over een gegeven tijdsblok[cite: 61, 63].
+    Compute the signal-to-interference ratio for two sources (one target source
+    and one interfering source). The script takes into account possible
+    switches between which source is the target and which one is the
+    interference. The script assumes there is access to each source's
+    contribution in the beamformer output.
+
+    Parameters
+    ----------
+    -y : [N x 1] np.ndarray[float]
+        Actual beamformer output signal (`N` is the number of samples).
+    -x1 : [N x 1] np.ndarray[float]
+        Beamformer output attributed to source 1.
+    -x2 : [N x 1] np.ndarray[float]
+        Beamformer output attributed to source 2.
+    -groundTruth : [N x 1] np.ndarray[int (0 or 1) or float (0. or 1.)]
+        Array indicating, for each sample,
+        which source is the target: 1=x1, 0=x2.
+
+    Returns
+    -------
+    -sir : 
     """
-    var_target = np.var(target_signal)
-    var_interf = np.var(interferer_signal)
-    
-    if var_interf < 1e-12:
-        return np.nan 
-        
-    return 10 * np.log10((var_target + 1e-12) / (var_interf + 1e-12))
+    # Sanity check (check whether `y = x1 + x2` based on RMSE of residual)
+    if np.sqrt(np.sum((y - x1 - x2) ** 2)) / np.sqrt(np.sum(y ** 2)) > 0.01:
+        print('/!\ Something is wrong, `y` should be the sum of `x1` and `x2`.')  
+        print('SIR can not be computed -- Returning NaN.')  
+        sir = np.nan
+    # Input check
+    elif np.sum(groundTruth) + np.sum(1 - groundTruth) != len(groundTruth):
+        print('/!\ `groundTruth` vector is not binary.')
+        print('SIR can not be computed')  
+        sir = np.nan
+    else:
+        sir = 10 * np.log10(
+            np.var(x1 * groundTruth + x2 * (1 - groundTruth)) /\
+                np.var(x2 * groundTruth + x1 * (1 - groundTruth))
+        )
+
+    return sir
 
 # ==========================================
 # FUNCTION: BLOCK-BASED FD-GSC MET COMPONENT SEPARATIE
 # ==========================================
-def gsc_fd_components(target_comp, interf_comp, fs, doa_estimate, LUT, lut_angles, mu=0.05):
+def gsc_fd_components(target_comp, interf_comp, fs, doa_estimate, LUT, lut_angles, mu=0.1): 
     """
     Filtert target en interferer simultaan door EXACT dezelfde filtergewichten
-    om een eerlijke SIR-meting te garanderen[cite: 68, 69].
+    om een eerlijke SIR-meting te garanderen.
     """
     mic = target_comp + interf_comp
     N_samples, M_mics = mic.shape
     
-    L = 1024
-    overlap = L // 2
+    L = 2048 # TUNING parameter: lengte van FFT en venster
+    overlap = int(L // 1.5) # TUNING: Strict 50% overlap voor correcte WOLA synthese
     window = np.sqrt(signal.windows.hann(L, sym=False))
     
     # STFT op alle componenten
@@ -60,13 +90,14 @@ def gsc_fd_components(target_comp, interf_comp, fs, doa_estimate, LUT, lut_angle
     nF, nT = Zxx_mic.shape[1], Zxx_mic.shape[2]
     
     # VAD op de zuivere target voor controle van adaptatie
-    vad = np.abs(target_comp[:, 0]) > (np.std(target_comp[:, 0]) * 1e-3)
+    vad = np.abs(target_comp[:, 0]) > (np.std(target_comp[:, 0]) * 1e-2) # TUNING: eenvoudige drempel op target energie
     vad_frames = np.zeros(nT)
     for n in range(nT):
         start_idx = n * (L - overlap)
         end_idx = start_idx + L
         if end_idx <= len(vad):
-            vad_frames[n] = 1 if np.mean(vad[start_idx:end_idx]) > 0.05 else 0
+            # VAD drempel: bepaalt wanneer filter mag updaten
+            vad_frames[n] = 1 if np.mean(vad[start_idx:end_idx]) > 0.1 else 0    
 
     E_out_mic = np.zeros((nF, nT), dtype=complex)
     E_out_tar = np.zeros((nF, nT), dtype=complex)
@@ -91,7 +122,7 @@ def gsc_fd_components(target_comp, interf_comp, fs, doa_estimate, LUT, lut_angle
             e_mic = y_FAS_mic - np.vdot(W_adapt[k, :], u_mic)
             E_out_mic[k, n] = e_mic
             
-            # Pas filter toe op gescheiden componenten voor SIR [cite: 69]
+            # Pas filter toe op gescheiden componenten voor SIR
             E_out_tar[k, n] = np.vdot(w_FAS, Zxx_tar[:,k,n]) - np.vdot(W_adapt[k,:], B_k @ Zxx_tar[:,k,n])
             E_out_int[k, n] = np.vdot(w_FAS, Zxx_int[:,k,n]) - np.vdot(W_adapt[k,:], B_k @ Zxx_int[:,k,n])
             
@@ -131,6 +162,7 @@ if __name__ == "__main__":
     i_dry = i_dry / np.max(np.abs(i_dry)) * 0.9
     
     full_mix_out, sir_in_history, sir_out_history = [], [], []
+    full_mic_in = [] # Lijst om originele mic input te bewaren
     
     print("\n" + "="*70)
     print(f"START TIME-VARYING GSC [{reverb_label}]")
@@ -139,6 +171,12 @@ if __name__ == "__main__":
     for i, rir_file in enumerate(rir_files):
         print(f"\n--- Segment {i+1}/5 ({i*10}-{(i+1)*10}s) ---")
         scenario = load_rirs(os.path.join(parent_dir, "rirs", rir_file))
+        
+        # Bereken de WARE hoek op basis van de coördinaten
+        target_pos = scenario.audioPos[0]
+        center_mic = np.mean(scenario.micPos, axis=0)
+        true_angle = np.degrees(np.arctan2(-(target_pos[0] - center_mic[0]), -(target_pos[1] - center_mic[1]))) % 360
+        print(f"WARE Target DOA (uit GUI coördinaten): {true_angle:.1f}°")
         
         # Bron detectie (Audio vs Noise RIR)
         target_rir = scenario.RIRs_audio[:, :, 0]
@@ -154,35 +192,63 @@ if __name__ == "__main__":
         # Convolutie
         t_comp = np.stack([signal.fftconvolve(chunk_t, target_rir[:,m], mode='full')[:segment_samples] for m in range(5)], axis=1)
         i_comp = np.stack([signal.fftconvolve(chunk_i, interf_rir[:,m], mode='full')[:segment_samples] for m in range(5)], axis=1)
+        mic_mix = t_comp + i_comp
         
         # --- VERBETERDE DOA SELECTIE ---
-        _, _, _, est_doas = music_wideband(t_comp + i_comp, fs, scenario)
-        # Zoek alleen naar kandidaten in het target-gebied (links, 90-180 graden) [cite: 32]
-        target_candidates = [d for d in est_doas if d >= 85]
+        _, _, _, est_doas = music_wideband(mic_mix, fs, scenario)
+        
+        # Zoek alleen naar kandidaten in het target-gebied (strikt tussen 90 en 180 graden)
+        target_candidates = [d for d in est_doas if d >= 90]
         if target_candidates:
             doa_estimate = target_candidates[np.argmin(np.abs(np.array(target_candidates) - 90.0))]
         else:
             doa_estimate = 90.0
         print(f"Geschatte Target DOA: {doa_estimate:.1f}°")
         
-        LUT, lut_angles = part1_4.generate_steering_lut(scenario, 1024, fs)
-        out_mix, out_tar, out_int = gsc_fd_components(t_comp, i_comp, fs, doa_estimate, LUT, lut_angles)
+        LUT, lut_angles = part1_4.generate_steering_lut(scenario, 2048, fs)
         
-        # SIR berekening [cite: 63, 71]
-        sir_in = compute_sir_metric(t_comp[:, 0], i_comp[:, 0])
-        sir_out = compute_sir_metric(out_tar, out_int)
+        # GSC Processing met getunede mu=0.005 om Target Cancellation te verminderen
+        out_mix, out_tar, out_int = gsc_fd_components(t_comp, i_comp, fs, doa_estimate, LUT, lut_angles, mu=0.005)
+        
+        # =====================================================================
+        # OFFICIELE SIR BEREKENING MET DE UNIVERSITEITSFUNCTIE
+        # =====================================================================
+        # Maak een groundTruth array aan (bron 1 is altijd target gedurende dit segment)
+        ground_truth_in = np.ones(len(t_comp[:, 0]), dtype=int)
+        ground_truth_out = np.ones(len(out_tar), dtype=int)
+        
+        # Input SIR berekenen
+        y_in = t_comp[:, 0] + i_comp[:, 0]
+        sir_in = compute_sir(y_in, t_comp[:, 0], i_comp[:, 0], ground_truth_in)
+        
+        # Output SIR berekenen
+        sir_out = compute_sir(out_mix, out_tar, out_int, ground_truth_out)
+        
         sir_in_history.append(sir_in)
         sir_out_history.append(sir_out)
         
         print(f"SIR In: {sir_in:.2f} dB | SIR Out: {sir_out:.2f} dB (Winst: {sir_out - sir_in:.2f} dB)")
+        
         full_mix_out.append(out_mix)
+        full_mic_in.append(mic_mix[:, 0]) # Sla het originele signaal van Mic 1 op
 
-    # Plot & Save
+    # Plot
     plt.figure(figsize=(10, 5))
     t_axis = np.arange(1, 6) * 10
     plt.plot(t_axis, sir_in_history, 'o--', color='gray', label='Input SIR')
     plt.plot(t_axis, sir_out_history, 's-', color='blue', label='Output SIR (GSC)')
     plt.title(f'SIR Verbetering [{reverb_label}]'); plt.ylabel('SIR (dB)'); plt.legend(); plt.grid(); plt.show()
 
+    # Exporteer Audio Bestanden
     final_output = np.concatenate(full_mix_out)
-    sf.write(os.path.join(parent_dir, f"GSC_Dynamic_{reverb_label}.wav"), final_output / np.max(np.abs(final_output)), fs)
+    final_mic_in = np.concatenate(full_mic_in)
+
+    mic_path = os.path.join(parent_dir, f"01_Origineel_Mic1_{reverb_label}.wav")
+    sf.write(mic_path, final_mic_in / np.max(np.abs(final_mic_in)), fs)
+
+    gsc_path = os.path.join(parent_dir, f"02_Gefilterd_GSC_{reverb_label}.wav")
+    sf.write(gsc_path, final_output / np.max(np.abs(final_output)), fs)
+
+    print(f"\nVerwerking voltooid! Je kunt de audio nu beluisteren:")
+    print(f" -> Vóór filter (Originele mix): {mic_path}")
+    print(f" -> Na filter   (GSC Output):    {gsc_path}")
