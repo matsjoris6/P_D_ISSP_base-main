@@ -264,6 +264,56 @@ def gsc_universal(micsigs, target_doa, fs, vad, is_1d_array=True, d=None, orient
 
 
 
+# Function to visualize steering vector for a given geometry
+
+def plot_steering_vector(mics_pos, fs, orientation="2d", d=None, freq=1000.0):
+    """Plot the steering vector (real part) versus angle.
+
+    mics_pos : array-like
+        For 1‑D arrays this should be a vector [0, d] or similar; for 2‑D it is an
+        (M,2) array of coordinates.
+    orientation : {'x','y','2d'}
+        Which formula to use when computing the delays. In the 2d case the full
+        geometry is respected.
+    d : float or None
+        Inter-microphone spacing for 1‑D setups (ignored for 2d).
+    freq : float
+        Frequency (Hz) at which to evaluate the steering vector.
+    """
+    angles = np.arange(0, 180.5, 0.5)
+    rads = np.radians(angles)
+    c = 343.0
+
+    if orientation == "2d":
+        mics_pos = np.asarray(mics_pos)
+        mics_centered = mics_pos - np.mean(mics_pos, axis=0)
+        px = mics_centered[:, 0].reshape(-1, 1)
+        py = mics_centered[:, 1].reshape(-1, 1)
+        taus = (px * np.cos(rads) + py * np.sin(rads)) / c
+    else:
+        # 1‑D case: pos vector describes separation along one axis
+        if d is None:
+            raise ValueError("`d` must be provided for 1d orientation plots")
+        mics_arr = np.array([0.0, d])
+        if orientation == "x":
+            taus = (mics_arr.reshape(-1, 1) * np.cos(rads)) / c
+        else:
+            taus = (mics_arr.reshape(-1, 1) * np.sin(rads)) / c
+
+    # steering vector at chosen frequency
+    A = np.exp(-1j * 2 * np.pi * freq * taus)
+
+    plt.figure(figsize=(8, 4))
+    for m in range(A.shape[0]):
+        plt.plot(angles, np.real(A[m, :]), label=f"mic {m}")
+    plt.title(f"Steering vector (real part) at {freq:.0f} Hz")
+    plt.xlabel("Angle (deg)")
+    plt.ylabel("Real{a}")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.show()
+
+
 # Data combinaties
 arrays = {
     "Linkeroor (2 mic)":   {"mics": np.column_stack((yL1_mix, yL2_mix)), "1d": True, "d": d_ear,"orientation": "y"},
@@ -276,11 +326,32 @@ results = {}
 
 for name, config in arrays.items():
     micsigs = config["mics"]
-    orientation= config["orientation"]
-   
+    orientation = config["orientation"]
+
+    # visualise the steering vector for this array geometry
+    print(f"\n[{name}] plotting steering vector to verify geometry...")
+    if config["1d"]:
+        # for 1D arrays we pass d and orientation
+        plot_steering_vector(mics_pos=np.array([0.0, config["d"]]),
+                             fs=fs_sim,
+                             orientation=orientation,
+                             d=config["d"],
+                             freq=1000.0)
+    else:
+        # for 2D we need the full positions used earlier
+        x_ear = 0.215 / 2
+        y_mic = 0.013 / 2
+        mics_pos = np.array([
+            [-x_ear,  y_mic],
+            [-x_ear, -y_mic],
+            [ x_ear,  y_mic],
+            [ x_ear, -y_mic]
+        ])
+        plot_steering_vector(mics_pos=mics_pos, fs=fs_sim, orientation="2d", freq=1000.0)
+
     if config["1d"]:
         _, _, est_doas = music_wideband_2mics(micsigs, fs_sim, config["d"], Q=1,orientation=orientation)
-         
+
         target_doa = est_doas[0]
         print(f"\n[{name}] MUSIC 1D Schatting: {target_doa:.1f}°")
     else:
