@@ -110,7 +110,7 @@ def gsc_td(scenario, speech_paths, noise_paths=None, duration=10.0):
     for i in range(M_mics - 1):
         B[i, 0] = 1
         B[i, i + 1] = -1
-    print(B)    
+       
     noise_refs = (B @ aligned_mic.T).T  
 
     L = 1024
@@ -193,7 +193,7 @@ if __name__ == "__main__":
         speech_paths = alle_spraak_bestanden[:num_audio]
 
         # Gelokaliseerde ruisbestand instellen
-        gekozen_ruisbestand = "Babble_noise1.wav" 
+        gekozen_ruisbestand = "speech2.wav" 
         ruis_pad = os.path.join(parent_dir, "sound_files", gekozen_ruisbestand)
         alle_ruis_bestanden = [ruis_pad]
         noise_paths = alle_ruis_bestanden[:num_noise]
