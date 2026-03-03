@@ -11,15 +11,13 @@ import importlib.util
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
-sys.path.append(current_dir)  # Voeg week 4 map toe zodat we part1_4 kunnen importeren
+sys.path.append(current_dir)
 
 # Importeer vereiste functies
 from package import load_rirs
 from package.utils import music_wideband
 
-# Importeer de Look-Up Table generator uit je Part 1 script
-# In Python: bestand "part1.4.py" kan niet direct geïmporteerd worden (dot in naam)
-# Gebruik importlib om het dynamisch te laden
+# Importeer de Look-Up Table generator uit part1.4.py
 spec = importlib.util.spec_from_file_location("part1_4", os.path.join(current_dir, "part1.4.py"))
 part1_4 = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(part1_4)
@@ -30,26 +28,23 @@ spec.loader.exec_module(part1_4)
 def compute_sir_metric(target_signal, interferer_signal):
     """
     Berekent de SIR over een gegeven tijdsblok[cite: 61, 63].
-    Formule: 10 * log10( var(target) / var(interferer) )
     """
     var_target = np.var(target_signal)
     var_interf = np.var(interferer_signal)
     
     if var_interf < 1e-12:
-        return np.nan # Voorkom deling door 0
+        return np.nan 
         
-    return 10 * np.log10((var_target + 1e-12) / var_interf)
+    return 10 * np.log10((var_target + 1e-12) / (var_interf + 1e-12))
 
 # ==========================================
 # FUNCTION: BLOCK-BASED FD-GSC MET COMPONENT SEPARATIE
 # ==========================================
 def gsc_fd_components(target_comp, interf_comp, fs, doa_estimate, LUT, lut_angles, mu=0.05):
     """
-    Voert de FD-GSC uit, maar filtert de target en interferer componenten
-    simultaan door EXACT dezelfde adaptieve filtergewichten om achteraf
-    de SIR correct te kunnen berekenen.
+    Filtert target en interferer simultaan door EXACT dezelfde filtergewichten
+    om een eerlijke SIR-meting te garanderen[cite: 68, 69].
     """
-    # De effectieve microfoonmix die het adaptieve filter stuurt
     mic = target_comp + interf_comp
     N_samples, M_mics = mic.shape
     
@@ -57,14 +52,14 @@ def gsc_fd_components(target_comp, interf_comp, fs, doa_estimate, LUT, lut_angle
     overlap = L // 2
     window = np.sqrt(signal.windows.hann(L, sym=False))
     
-    # STFT op de mix, de target én de interferer
+    # STFT op alle componenten
     _, _, Zxx_mic = signal.stft(mic.T, fs, window=window, nperseg=L, noverlap=overlap)
     _, _, Zxx_tar = signal.stft(target_comp.T, fs, window=window, nperseg=L, noverlap=overlap)
     _, _, Zxx_int = signal.stft(interf_comp.T, fs, window=window, nperseg=L, noverlap=overlap)
     
     nF, nT = Zxx_mic.shape[1], Zxx_mic.shape[2]
     
-    # VAD gebaseerd op de pure target
+    # VAD op de zuivere target voor controle van adaptatie
     vad = np.abs(target_comp[:, 0]) > (np.std(target_comp[:, 0]) * 1e-3)
     vad_frames = np.zeros(nT)
     for n in range(nT):
@@ -73,7 +68,6 @@ def gsc_fd_components(target_comp, interf_comp, fs, doa_estimate, LUT, lut_angle
         if end_idx <= len(vad):
             vad_frames[n] = 1 if np.mean(vad[start_idx:end_idx]) > 0.05 else 0
 
-    # Output arrays
     E_out_mic = np.zeros((nF, nT), dtype=complex)
     E_out_tar = np.zeros((nF, nT), dtype=complex)
     E_out_int = np.zeros((nF, nT), dtype=complex)
@@ -90,31 +84,23 @@ def gsc_fd_components(target_comp, interf_comp, fs, doa_estimate, LUT, lut_angle
         B_k = N_mat.conj().T 
         
         for n in range(nT):
-            # Berekeningen op de MIX (bepaalt de filter adaptatie)
+            # MIX (voor adaptatie)
             x_mic = Zxx_mic[:, k, n]
             y_FAS_mic = np.vdot(w_FAS, x_mic)
             u_mic = B_k @ x_mic
             e_mic = y_FAS_mic - np.vdot(W_adapt[k, :], u_mic)
             E_out_mic[k, n] = e_mic
             
-            # Pas EXACT DITZELFDE FILTER toe op de target component
-            x_tar = Zxx_tar[:, k, n]
-            y_FAS_tar = np.vdot(w_FAS, x_tar)
-            u_tar = B_k @ x_tar
-            E_out_tar[k, n] = y_FAS_tar - np.vdot(W_adapt[k, :], u_tar)
+            # Pas filter toe op gescheiden componenten voor SIR [cite: 69]
+            E_out_tar[k, n] = np.vdot(w_FAS, Zxx_tar[:,k,n]) - np.vdot(W_adapt[k,:], B_k @ Zxx_tar[:,k,n])
+            E_out_int[k, n] = np.vdot(w_FAS, Zxx_int[:,k,n]) - np.vdot(W_adapt[k,:], B_k @ Zxx_int[:,k,n])
             
-            # Pas EXACT DITZELFDE FILTER toe op de interferer component
-            x_int = Zxx_int[:, k, n]
-            y_FAS_int = np.vdot(w_FAS, x_int)
-            u_int = B_k @ x_int
-            E_out_int[k, n] = y_FAS_int - np.vdot(W_adapt[k, :], u_int)
-            
-            # Update W_adapt ALLEEN op basis van de mix en VAD
+            # NLMS update alleen bij afwezigheid van target (VAD == 0)
             if vad_frames[n] == 0:
-                power = np.vdot(u_mic, u_mic).real + 1e-10
-                W_adapt[k, :] += mu * u_mic * np.conj(e_mic) / power
+                p_u = np.vdot(u_mic, u_mic).real + 1e-10
+                W_adapt[k, :] += mu * u_mic * np.conj(e_mic) / p_u
 
-    # Synthese
+    # Synthese (WOLA)
     _, out_tar_td = signal.istft(E_out_tar, fs, window=window, nperseg=L, noverlap=overlap)
     _, out_int_td = signal.istft(E_out_int, fs, window=window, nperseg=L, noverlap=overlap)
     _, out_mic_td = signal.istft(E_out_mic, fs, window=window, nperseg=L, noverlap=overlap)
@@ -125,150 +111,78 @@ def gsc_fd_components(target_comp, interf_comp, fs, doa_estimate, LUT, lut_angle
 # MAIN PROGRAMMA
 # ==========================================
 if __name__ == "__main__":
-    # ===============================================
-    # CONFIGURATIE: KIES HIER JOUW INSTELLINGEN
-    # ===============================================
-    use_reverb = False  # Set to True voor reverberant RIRs, False voor dry/no_reverb
+    use_reverb = False  # Pas aan voor REVERBERANT (True) of NO_REVERB (False)
     
     fs = 44100
-    segment_duration = 10.0 # 10 seconden per positie [cite: 31, 42]
+    segment_duration = 10.0 
     segment_samples = int(fs * segment_duration)
     
-    # 1. Definieer de paden naar je 5 gegenereerde RIRs voor een specifieke T60
-    # PAS DEZE NAMEN AAN NAAR HOE JIJ ZE IN DE GUI HEBT GENOEMD!
-    # Vervang de oude lijst door deze:
-    rir_files_no_reverb = [
-        "160_20_no_reverb.pkl",
-        "140_40_no_reverb.pkl",
-        "120_60_no_reverb.pkl",
-        "100_40_no_reverb.pkl",
-        "95_85_no_reverb.pkl"
-    ]
-
-    # Vervang de oude lijst door deze:
-    rir_files_reverb = [
-        "160_20_reverb.pkl",
-        "140_40_reverb.pkl",
-        "120_60_reverb.pkl",
-        "100_40_reverb.pkl",
-        "95_85_reverb.pkl"
-    ]
+    # Gebruik jouw specifieke bestandsnamen
+    rir_files_no_reverb = ["160_20_no_reverb.pkl", "140_40_no_reverb.pkl", "120_60_no_reverb.pkl", "100_40_no_reverb.pkl", "95_85_no_reverb.pkl"]
+    rir_files_reverb = ["160_20_reverb.pkl", "140_40_reverb.pkl", "120_60_reverb.pkl", "100_40_reverb.pkl", "95_85_reverb.pkl"]
     
-    # Selecteer op basis van de instelling hierboven
-    if use_reverb:
-        rir_files = rir_files_reverb
-        reverb_label = "REVERBERANT"
-    else:
-        rir_files = rir_files_no_reverb
-        reverb_label = "NO_REVERB"
+    rir_files = rir_files_reverb if use_reverb else rir_files_no_reverb
+    reverb_label = "REVERBERANT" if use_reverb else "NO_REVERB"
     
-    # 2. Laad de droge audio (zorg dat ze minimaal 50 seconden lang zijn!)
-    target_audio, _ = sf.read(os.path.join(parent_dir, "sound_files", "part1_track1_dry.wav")) # [cite: 41]
-    interf_audio, _ = sf.read(os.path.join(parent_dir, "sound_files", "part1_track2_dry.wav")) # [cite: 41]
+    # Laden en NORMALISEREN van audio voor gelijke startpositie
+    t_dry, _ = sf.read(os.path.join(parent_dir, "sound_files", "part1_track1_dry.wav"))
+    i_dry, _ = sf.read(os.path.join(parent_dir, "sound_files", "part1_track2_dry.wav"))
+    t_dry = t_dry / np.max(np.abs(t_dry)) * 0.9
+    i_dry = i_dry / np.max(np.abs(i_dry)) * 0.9
     
-    # Lijsten om de volledige 50s signalen op te slaan
-    full_target_in, full_interf_in = [], []
-    full_target_out, full_interf_out, full_mix_out = [], [], []
-    
-    sir_in_history, sir_out_history, doas_history = [], [], []
+    full_mix_out, sir_in_history, sir_out_history = [], [], []
     
     print("\n" + "="*70)
-    print(f"START TIME-VARYING SCENARIO VERWERKING [{reverb_label}]")
-    print(f"RIR Files: {rir_files}")
+    print(f"START TIME-VARYING GSC [{reverb_label}]")
     print("="*70)
     
     for i, rir_file in enumerate(rir_files):
-        print(f"\n--- Verwerken van Segment {i+1}/5 (0-{segment_duration}s) ---")
-        
-        # Laad scenario
+        print(f"\n--- Segment {i+1}/5 ({i*10}-{(i+1)*10}s) ---")
         scenario = load_rirs(os.path.join(parent_dir, "rirs", rir_file))
         
-        # DEBUG: Print hoeveel bronnen er zijn gevonden
-        print(f"DEBUG: Aantal Audio RIRs: {scenario.RIRs_audio.shape[2]}")
-        
-        target_rir = scenario.RIRs_audio[:, :, 0] # Altijd bron 1
-        
-        # Check of de tweede bron in RIRs_audio of RIRs_noise staat
+        # Bron detectie (Audio vs Noise RIR)
+        target_rir = scenario.RIRs_audio[:, :, 0]
         if scenario.RIRs_audio.shape[2] > 1:
             interf_rir = scenario.RIRs_audio[:, :, 1]
-        elif hasattr(scenario, 'RIRs_noise') and scenario.RIRs_noise is not None:
-            print("Interferer gevonden in RIRs_noise")
-            interf_rir = scenario.RIRs_noise[:, :, 0]
         else:
-            raise ValueError(f"Bestand {rir_file} bevat slechts 1 bron. Beiden zijn nodig voor SIR berekening!")
-        
-        # Snij de juiste 10 seconden uit de bron-audio
-        start_idx = i * segment_samples
-        end_idx = start_idx + segment_samples
-        
-        # Zorg voor looping als audio korter is dan 50s
-        chunk_target = target_audio[start_idx % len(target_audio) : end_idx % len(target_audio)]
-        chunk_interf = interf_audio[start_idx % len(interf_audio) : end_idx % len(interf_audio)]
-        if len(chunk_target) < segment_samples: 
-            chunk_target = np.pad(chunk_target, (0, segment_samples - len(chunk_target)))
-            chunk_interf = np.pad(chunk_interf, (0, segment_samples - len(chunk_interf)))
+            interf_rir = scenario.RIRs_noise[:, :, 0]
 
-        # Convolve met de RIRs om de microfooncomponenten te krijgen
-        M_mics = target_rir.shape[1]
-        target_comp = np.zeros((segment_samples, M_mics))
-        interf_comp = np.zeros((segment_samples, M_mics))
+        # Audio segmenten pakken
+        chunk_t = t_dry[i*segment_samples : (i+1)*segment_samples]
+        chunk_i = i_dry[i*segment_samples : (i+1)*segment_samples]
+
+        # Convolutie
+        t_comp = np.stack([signal.fftconvolve(chunk_t, target_rir[:,m], mode='full')[:segment_samples] for m in range(5)], axis=1)
+        i_comp = np.stack([signal.fftconvolve(chunk_i, interf_rir[:,m], mode='full')[:segment_samples] for m in range(5)], axis=1)
         
-        for m in range(M_mics):
-            t_conv = signal.fftconvolve(chunk_target, target_rir[:, m], mode='full')
-            i_conv = signal.fftconvolve(chunk_interf, interf_rir[:, m], mode='full')
-            target_comp[:, m] = t_conv[:segment_samples]
-            interf_comp[:, m] = i_conv[:segment_samples]
-            
-        mic_mix = target_comp + interf_comp
-        
-        # MUSIC DOA Estimation [cite: 43]
-        angles_music, _, _, est_doas = music_wideband(mic_mix, fs, scenario)
-        doa_estimate = est_doas[np.argmin(np.abs(est_doas - 90.0))] if len(est_doas) > 0 else 90.0
-        doas_history.append(doa_estimate)
+        # --- VERBETERDE DOA SELECTIE ---
+        _, _, _, est_doas = music_wideband(t_comp + i_comp, fs, scenario)
+        # Zoek alleen naar kandidaten in het target-gebied (links, 90-180 graden) [cite: 32]
+        target_candidates = [d for d in est_doas if d >= 85]
+        if target_candidates:
+            doa_estimate = target_candidates[np.argmin(np.abs(np.array(target_candidates) - 90.0))]
+        else:
+            doa_estimate = 90.0
         print(f"Geschatte Target DOA: {doa_estimate:.1f}°")
         
-        # Genereer Look-Up Table (Eenmalig per blok)
         LUT, lut_angles = part1_4.generate_steering_lut(scenario, 1024, fs)
+        out_mix, out_tar, out_int = gsc_fd_components(t_comp, i_comp, fs, doa_estimate, LUT, lut_angles)
         
-        # Run de aangepaste GSC
-        out_mix, out_tar, out_int = gsc_fd_components(
-            target_comp, interf_comp, fs, doa_estimate, LUT, lut_angles
-        )
-        
-        # SIR Berekeningen [cite: 44, 45]
-        sir_in = compute_sir_metric(target_comp[:, 0], interf_comp[:, 0])
+        # SIR berekening [cite: 63, 71]
+        sir_in = compute_sir_metric(t_comp[:, 0], i_comp[:, 0])
         sir_out = compute_sir_metric(out_tar, out_int)
-        
         sir_in_history.append(sir_in)
         sir_out_history.append(sir_out)
         
-        print(f"Input SIR (Mic 1): {sir_in:.2f} dB")
-        print(f"Output SIR (GSC):  {sir_out:.2f} dB (Winst: {sir_out - sir_in:.2f} dB)")
-        
-        # Opslaan voor de uiteindelijke 50s audio
-        full_target_in.append(target_comp[:, 0])
+        print(f"SIR In: {sir_in:.2f} dB | SIR Out: {sir_out:.2f} dB (Winst: {sir_out - sir_in:.2f} dB)")
         full_mix_out.append(out_mix)
 
-    # Concateneer alle blokken tot één 50s signaal
-    final_input = np.concatenate(full_target_in)
-    final_output = np.concatenate(full_mix_out)
-    
-    # Plot het verloop over tijd
-    plt.figure(figsize=(12, 6))
-    t_blocks = np.arange(1, len(sir_in_history) + 1) * segment_duration
-    plt.plot(t_blocks, sir_in_history, marker='o', linestyle='--', color='gray', label='Input SIR (Mic 1)', linewidth=2)
-    plt.plot(t_blocks, sir_out_history, marker='s', linestyle='-', color='blue', label='Output SIR (GSC)', linewidth=2)
-    plt.title(f'SIR Evolutie in Tijds-Variërend Scenario [{reverb_label}]')
-    plt.xlabel(f'Tijdstip van verandering (s, interval={segment_duration}s)')
-    plt.ylabel('SIR (dB)')
-    plt.legend(loc='best')
-    plt.grid(True, alpha=0.4)
-    plt.tight_layout()
-    plt.show()
+    # Plot & Save
+    plt.figure(figsize=(10, 5))
+    t_axis = np.arange(1, 6) * 10
+    plt.plot(t_axis, sir_in_history, 'o--', color='gray', label='Input SIR')
+    plt.plot(t_axis, sir_out_history, 's-', color='blue', label='Output SIR (GSC)')
+    plt.title(f'SIR Verbetering [{reverb_label}]'); plt.ylabel('SIR (dB)'); plt.legend(); plt.grid(); plt.show()
 
-    # Audio exporteren met label
-    output_filename = f"Part2_Dynamic_Output_{reverb_label}_{len(sir_in_history)}_segments.wav"
-    output_path = os.path.join(parent_dir, output_filename)
-    sf.write(output_path, final_output / np.max(np.abs(final_output)), fs)
-    print(f"\nVerwerking voltooid. Audio opgeslagen als '{output_filename}'")
-    print(f"Volledige pad: {output_path}")
+    final_output = np.concatenate(full_mix_out)
+    sf.write(os.path.join(parent_dir, f"GSC_Dynamic_{reverb_label}.wav"), final_output / np.max(np.abs(final_output)), fs)
