@@ -142,7 +142,7 @@ def gsc_fd_components(target_comp, interf_comp, fs, doa_estimate, LUT, lut_angle
 # MAIN PROGRAMMA
 # ==========================================
 if __name__ == "__main__":
-    use_reverb = False  # Pas aan voor REVERBERANT (True) of NO_REVERB (False)
+    use_reverb = True  # Pas aan voor REVERBERANT (True) of NO_REVERB (False)
     
     fs = 44100
     segment_duration = 10.0 
