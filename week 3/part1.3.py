@@ -23,10 +23,8 @@ acoustic_scenario = load_rirs(latest_rir)
 
 speech_files = [
     os.path.join("sound_files", "speech1.wav"),
-    os.path.join("sound_files", "speech2.wav")
 ]
-noise_files = [os.path.join("sound_files", "Babble_noise1.wav")] 
-
+noise_files = [os.path.join("sound_files", "Babble_noise1.wav")]
 
 duration = 5.0
 micsigs, speech_comp, noise_comp = create_micsigs_modified(acoustic_scenario, speech_files, noise_files, duration)
