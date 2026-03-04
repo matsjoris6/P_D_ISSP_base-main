@@ -547,4 +547,4 @@ def compute_sir(y, x1, x2, groundTruth):
                 np.var(x2 * groundTruth + x1 * (1 - groundTruth))
         )
 
-    return sir
+    return 
