@@ -170,32 +170,41 @@ def build_lut_for_target(target_rir, L=1024):
             
     return W_FAS, B_matrix
 
-def gsc_fd(scenario, speech_paths, noise_paths=None, duration=10.0):
+def gsc_fd(scenario, speech_paths, noise_paths=None, duration=10.0, vad_threshold=1e-3):
     # 1. Genereer Micsigs
-    mic, speech, noise, snr_in, vad = modified_create_micsigs(scenario, speech_paths, noise_paths, duration)
+    mic, speech, noise, snr_in, _ = modified_create_micsigs(scenario, speech_paths, noise_paths, duration)
     N_samples, M_mics = mic.shape
     L = 1024
     overlap = L // 2
+    
+    # Gebruik Square-Root Hanning Window zoals gevraagd in de opdracht
+    window_sqrthann = np.sqrt(signal.windows.hann(L, sym=False))
 
-  
-    angles, _, _, est_doas, Y_stft = music_wideband(mic, scenario.fs, scenario)
+    angles, _, _, est_doas, _ = music_wideband(mic, scenario.fs, scenario)
     target_doa = est_doas[np.argmin(np.abs(est_doas - 90.0))]
     print(f"\n[FD-GSC] Target DOA: {target_doa:.1f}°")
 
     # 3. Look-Up Table (LUT) genereren voor FAS en BM op basis van de RIR
-
     target_rir = get_target_rir_from_scenario(scenario, source_index=0)
     W_FAS_lut, B_lut = build_lut_for_target(target_rir, L=L)
 
-    # 4. VAD synchroniseren met STFT
-    _, nF, nT = Y_stft.shape
-    vad_frames = np.zeros(nT)
-    samples_per_frame = L - overlap
-    for n in range(nT):
-        start_idx = n * samples_per_frame
-        end_idx = start_idx + L
-        if end_idx <= N_samples:
-            vad_frames[n] = 1 if np.mean(vad[start_idx:end_idx]) > 0.5 else 0
+    # 4. STFT uitvoeren met het nieuwe window
+    _, _, Zxx_mix = signal.stft(mic.T, fs=scenario.fs, window=window_sqrthann, nperseg=L, noverlap=overlap)
+    _, _, Zxx_tar = signal.stft(speech.T, fs=scenario.fs, window=window_sqrthann, nperseg=L, noverlap=overlap)
+    
+    nF, nT = Zxx_mix.shape[1], Zxx_mix.shape[2]
+
+    # --- NIEUW: IDEALE FREQUENTIEDOMEIN VAD (Subband VAD) ---
+    Zxx_tar_mic1 = Zxx_tar[0, :, :]
+    thresholds = np.std(np.abs(Zxx_tar_mic1), axis=1, keepdims=True) * vad_threshold + 1e-6
+    VAD_FD = np.abs(Zxx_tar_mic1) > thresholds
+
+    # Print VAD Statistieken
+    actieve_bins = np.sum(VAD_FD)
+    totaal_bins = nF * nT
+    percentage_spraak = (actieve_bins / totaal_bins) * 100
+    percentage_adaptatie = 100 - percentage_spraak
+    print(f"  [VAD-FD] Spraak in {percentage_spraak:.1f}% van de tijd-frequentie bins | Filter leert in {percentage_adaptatie:.1f}% van de bins.")
 
     # 5. GSC Filtering in het Frequentiedomein
     E_out = np.zeros((nF, nT), dtype=complex)
@@ -204,15 +213,14 @@ def gsc_fd(scenario, speech_paths, noise_paths=None, duration=10.0):
     mu = 0.05
     eps = 1e-8
     
-     #frequentie-domein filtering
+    # Frequenty-domein filtering
     for k in range(nF):
-        # Haal vooraf berekende matrices uit LUT
         w_fas = W_FAS_lut[k, :].reshape(M_mics, 1)
         B_k = B_lut[k, :, :]
         w_nlms = np.zeros((M_mics - 1, 1), dtype=complex)
         
         for n in range(nT):
-            y_kn = Y_stft[:, k, n].reshape(M_mics, 1)
+            y_kn = Zxx_mix[:, k, n].reshape(M_mics, 1)
             
             # FAS Pad (Target)
             d_kn = (w_fas.conj().T @ y_kn)[0, 0]
@@ -226,31 +234,34 @@ def gsc_fd(scenario, speech_paths, noise_paths=None, duration=10.0):
             e_kn = d_kn - y_out_kn
             E_out[k, n] = e_kn
             
-            # NLMS Update (enkel tijdens stilte)
-            if vad_frames[n] == 0:
+            # NLMS Update (enkel tijdens stilte op basis van de Subband VAD!)
+            if VAD_FD[k, n] == False:
                 power = np.real((x_kn.conj().T @ x_kn)[0, 0])
                 w_nlms += mu * np.conj(e_kn) * x_kn / (power + eps)
 
-    # 6. Synthese (Inverse STFT)
-    _, fas_out_time = signal.istft(FAS_out, fs=scenario.fs, window='hann', nperseg=L, noverlap=overlap)
-    _, gsc_out_time = signal.istft(E_out, fs=scenario.fs, window='hann', nperseg=L, noverlap=overlap)
+    # 6. Synthese (Inverse STFT) met hetzelfde square-root window
+    _, fas_out_time = signal.istft(FAS_out, fs=scenario.fs, window=window_sqrthann, nperseg=L, noverlap=overlap)
+    _, gsc_out_time = signal.istft(E_out, fs=scenario.fs, window=window_sqrthann, nperseg=L, noverlap=overlap)
     
     fas_out_time = fas_out_time[:N_samples]
     gsc_out_time = gsc_out_time[:N_samples]
     
-    # 7. SNR Berekening
+    # 7. SNR Berekening (We gebruiken hier nog de oude tijdsdomein VAD puur voor de output-berekening)
+    vad_time = np.abs(speech[:, 0]) > (np.std(speech[:, 0]) * 1e-3)
+    
     def calc_snr(sig, vad_mask):
         Ps = np.var(sig[vad_mask == 1])
         Pn = np.var(sig[vad_mask == 0])
         return 10 * np.log10(max(Ps, 1e-10) / max(Pn, 1e-10))
         
-    snr_fas = calc_snr(fas_out_time, vad)
-    snr_gsc = calc_snr(gsc_out_time, vad)
+    snr_fas = calc_snr(fas_out_time, vad_time)
+    snr_gsc = calc_snr(gsc_out_time, vad_time)
     
     print(f"  -> Input SNR:  {snr_in:.2f} dB")
     print(f"  -> FAS SNR:    {snr_fas:.2f} dB (Winst: {snr_fas - snr_in:.2f} dB)")
     print(f"  -> GSC SNR:    {snr_gsc:.2f} dB (Winst: {snr_gsc - snr_in:.2f} dB)")
 
+    # Plot genereren
     t = np.arange(N_samples) / scenario.fs
     
     plt.figure(figsize=(14, 7))

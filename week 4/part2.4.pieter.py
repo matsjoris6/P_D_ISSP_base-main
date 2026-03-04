@@ -170,7 +170,7 @@ def build_lut_for_target(target_rir, L=1024):
             
     return W_FAS, B_matrix
 
-def gsc_fd(scenario, speech_paths=None, noise_paths=None, duration=10.0, mu=0.1, precomputed_speech=None, precomputed_noise=None, vad_threshold=0.001):
+def gsc_fd(scenario, speech_paths=None, noise_paths=None, duration=10.0, mu=0.1, precomputed_speech=None, precomputed_noise=None, vad_threshold=0.1):
     speech = precomputed_speech
     noise = precomputed_noise
     mic = speech + noise
@@ -190,8 +190,8 @@ def gsc_fd(scenario, speech_paths=None, noise_paths=None, duration=10.0, mu=0.1,
     
     nF, nT = Zxx_mix.shape[1], Zxx_mix.shape[2]
 
-# --- FIX: SUBBAND VAD OP MICROFOON 1 ---
-    # We isoleren microfoon 1 (index 0) om de VAD wiskunde in 2D te houden
+#  SUBBAND VAD OP MICROFOON 1 
+    # microfoon 1 (index 0) om de VAD wiskunde in 2D te houden
     Zxx_tar_mic1 = Zxx_tar[0, :, :]
     
     # Bereken de drempelwaarde per frequentie-bin (k) over de tijds-as (as 1)
