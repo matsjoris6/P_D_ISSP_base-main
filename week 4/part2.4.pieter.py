@@ -170,37 +170,47 @@ def build_lut_for_target(target_rir, L=1024):
             
     return W_FAS, B_matrix
 
-def gsc_fd(scenario, speech_paths, noise_paths=None, duration=10.0, mu=0.05):
-    # 1. Genereer Micsigs (Mix, en losse componenten)
-    mic, speech, noise, snr_in, vad = modified_create_micsigs(scenario, speech_paths, noise_paths, duration)
+def gsc_fd(scenario, speech_paths=None, noise_paths=None, duration=10.0, mu=0.1, precomputed_speech=None, precomputed_noise=None, vad_threshold=0.1):
+    speech = precomputed_speech
+    noise = precomputed_noise
+    mic = speech + noise
+    snr_in = 10 * np.log10(np.var(speech[:, 0]) / np.var(noise[:, 0]))
+    
     N_samples, M_mics = mic.shape
     L = 1024
     overlap = L // 2
-
-    print(f"\n[FD-GSC] LUT bouwen op basis van exacte RIR...")
+    window_sqrthann = np.sqrt(signal.windows.hann(L, sym=False))
     target_rir = get_target_rir_from_scenario(scenario, source_index=0)
+
     W_FAS_lut, B_lut = build_lut_for_target(target_rir, L=L)
 
-    # 2. STFT voor de Mix én de losse componenten!
-    _, _, Zxx_mix = signal.stft(mic.T, fs=scenario.fs, window='hann', nperseg=L, noverlap=overlap)
-    _, _, Zxx_tar = signal.stft(speech.T, fs=scenario.fs, window='hann', nperseg=L, noverlap=overlap)
-    _, _, Zxx_int = signal.stft(noise.T, fs=scenario.fs, window='hann', nperseg=L, noverlap=overlap)
+    _, _, Zxx_mix = signal.stft(mic.T, fs=scenario.fs, window=window_sqrthann, nperseg=L, noverlap=overlap)
+    _, _, Zxx_tar = signal.stft(speech.T, fs=scenario.fs, window=window_sqrthann, nperseg=L, noverlap=overlap)
+    _, _, Zxx_int = signal.stft(noise.T, fs=scenario.fs, window=window_sqrthann, nperseg=L, noverlap=overlap)
     
     nF, nT = Zxx_mix.shape[1], Zxx_mix.shape[2]
 
-    # 3. VAD synchroniseren
-    vad_frames = np.zeros(nT)
-    samples_per_frame = L - overlap
-    for n in range(nT):
-        start_idx = n * samples_per_frame
-        end_idx = start_idx + L
-        if end_idx <= N_samples:
-            vad_frames[n] = 1 if np.mean(vad[start_idx:end_idx]) > 0.5 else 0
+# --- FIX: SUBBAND VAD OP MICROFOON 1 ---
+    # We isoleren microfoon 1 (index 0) om de VAD wiskunde in 2D te houden
+    Zxx_tar_mic1 = Zxx_tar[0, :, :]
+    
+    # Bereken de drempelwaarde per frequentie-bin (k) over de tijds-as (as 1)
+    thresholds = np.std(np.abs(Zxx_tar_mic1), axis=1, keepdims=True) * vad_threshold + 1e-6
+    
+    # Maak een 2D-matrix met True/False voor elke frequentie (k) en elk frame (n)
+    VAD_FD = np.abs(Zxx_tar_mic1) > thresholds
 
-    # 4. GSC Filtering
+    # Print statistieken
+    actieve_bins = np.sum(VAD_FD)
+    totaal_bins = nF * nT
+    percentage_spraak = (actieve_bins / totaal_bins) * 100
+    percentage_adaptatie = 100 - percentage_spraak
+    print(f"   [VAD-FD] Drempel {vad_threshold} -> Spraak in {percentage_spraak:.1f}% | Filter leert in {percentage_adaptatie:.1f}% van de bins.")
+    
+
     E_out_mix = np.zeros((nF, nT), dtype=complex)
-    E_out_tar = np.zeros((nF, nT), dtype=complex) # Voor SIR (x1)
-    E_out_int = np.zeros((nF, nT), dtype=complex) # Voor SIR (x2)
+    E_out_tar = np.zeros((nF, nT), dtype=complex) 
+    E_out_int = np.zeros((nF, nT), dtype=complex) 
     FAS_out   = np.zeros((nF, nT), dtype=complex) 
     
     eps = 1e-8
@@ -211,45 +221,37 @@ def gsc_fd(scenario, speech_paths, noise_paths=None, duration=10.0, mu=0.05):
         w_nlms = np.zeros((M_mics - 1,), dtype=complex)
         
         for n in range(nT):
-            # Signalen ophalen
             x_mix = Zxx_mix[:, k, n]
             x_tar = Zxx_tar[:, k, n]
             x_int = Zxx_int[:, k, n]
             
-            # --- Mix (Bepaalt de filter updates) ---
             y_fas_mix = np.vdot(w_fas, x_mix)
             u_mix = B_k @ x_mix
             e_mix = y_fas_mix - np.vdot(w_nlms, u_mix)
             E_out_mix[k, n] = e_mix
             FAS_out[k, n] = y_fas_mix
             
-            # NLMS Update (enkel tijdens stilte)
-            if vad_frames[n] == 0:
-                power = np.vdot(u_mix, u_mix).real
-                w_nlms += mu * u_mix * np.conj(e_mix) / (power + eps)
-
-            # --- Shadow Filtering (Pas zelfde filter toe op losse spraak/ruis) ---
+            
             y_fas_tar = np.vdot(w_fas, x_tar)
             u_tar = B_k @ x_tar
-            E_out_tar[k, n] = y_fas_tar - np.vdot(w_nlms, u_tar) # x1
+            E_out_tar[k, n] = y_fas_tar - np.vdot(w_nlms, u_tar) 
 
             y_fas_int = np.vdot(w_fas, x_int)
             u_int = B_k @ x_int
-            E_out_int[k, n] = y_fas_int - np.vdot(w_nlms, u_int) # x2
+            E_out_int[k, n] = y_fas_int - np.vdot(w_nlms, u_int) 
 
-    # 5. Synthese (Inverse STFT)
-    _, gsc_out_mix = signal.istft(E_out_mix, fs=scenario.fs, window='hann', nperseg=L, noverlap=overlap)
-    _, fas_out_time = signal.istft(FAS_out, fs=scenario.fs, window='hann', nperseg=L, noverlap=overlap)
-    _, out_tar = signal.istft(E_out_tar, fs=scenario.fs, window='hann', nperseg=L, noverlap=overlap)
-    _, out_int = signal.istft(E_out_int, fs=scenario.fs, window='hann', nperseg=L, noverlap=overlap)
+            # We updaten het filter alleen als er in DEZE bin (k) en DIT frame (n) geen spraak is!
+            if VAD_FD[k, n] == False:
+                power = np.vdot(u_mix, u_mix).real
+                w_nlms += mu * u_mix * np.conj(e_mix) / (power + eps)
+
+
+    _, gsc_out_mix = signal.istft(E_out_mix, fs=scenario.fs, window=window_sqrthann, nperseg=L, noverlap=overlap)
+    _, fas_out_time = signal.istft(FAS_out, fs=scenario.fs, window=window_sqrthann, nperseg=L, noverlap=overlap)
+    _, out_tar = signal.istft(E_out_tar, fs=scenario.fs, window=window_sqrthann, nperseg=L, noverlap=overlap)
+    _, out_int = signal.istft(E_out_int, fs=scenario.fs, window=window_sqrthann, nperseg=L, noverlap=overlap)
     
-    gsc_out_mix = gsc_out_mix[:N_samples]
-    fas_out_time = fas_out_time[:N_samples]
-    out_tar = out_tar[:N_samples]
-    out_int = out_int[:N_samples]
-
-    # Geef nu ALLES terug wat we ooit nodig kunnen hebben!
-    return gsc_out_mix, mic, snr_in, fas_out_time, out_tar, out_int, speech, noise
+    return gsc_out_mix[:N_samples], mic, snr_in, fas_out_time[:N_samples], out_tar[:N_samples], out_int[:N_samples], speech, noise
 
 import numpy as np
 
@@ -295,29 +297,25 @@ def compute_sir(y, x1, x2, groundTruth):
 
     return sir
 
-# ==========================================
-# MAIN PROGRAMMA: DEEL 2 (TIME-VARYING SCENARIO)
-# ==========================================
 if __name__ == "__main__":
     
     fs = 44100
     segment_duration = 10.0 
     segment_samples = int(fs * segment_duration)
     
-    # Audio inladen (zonder extra looping)
+   
     t_dry, _ = sf.read(os.path.join(parent_dir, "sound_files", "part1_track1_dry.wav"))
     i_dry, _ = sf.read(os.path.join(parent_dir, "sound_files", "part1_track2_dry.wav"))
     
     t_dry = t_dry / np.max(np.abs(t_dry)) * 0.9
     i_dry = i_dry / np.max(np.abs(i_dry)) * 0.9
 
-    # De opdracht vereist het vergelijken van ANECHOIC (0s) en REVERBERANT (1s)
-    # We laten de code automatisch achter elkaar beide scenario's runnen
+   
     for use_reverb in [False, True]:
         
         reverb_label = "REVERBERANT (T60=1s)" if use_reverb else "ANECHOIC (T60=0s)"
         
-        # JOUW RIR BESTANDEN VOOR DE 5 POSITIES
+        
         if not use_reverb:
             rir_files = ["160_20_no_reverb.pkl", "140_40_no_reverb.pkl", "120_60_no_reverb.pkl", "100_40_no_reverb.pkl", "95_85_no_reverb.pkl"]
         else:
@@ -338,7 +336,7 @@ if __name__ == "__main__":
             try:
                 scenario = load_rirs(os.path.join(parent_dir, "rirs", rir_file))
             except Exception as e:
-                print(f"❌ Kon {rir_file} niet vinden in map 'rirs'. Controleer de naam!")
+                print(f" Kon {rir_file} niet vinden in map 'rirs'. Controleer de naam!")
                 sys.exit()
 
             target_rir = scenario.RIRs_audio[:, :, 0]
@@ -362,8 +360,13 @@ if __name__ == "__main__":
             noise_paths = [os.path.join(parent_dir, "sound_files", "part1_track2_dry.wav")]
             
             # Voer GSC uit (gebruikt RIR van het huidige scenario)
+           # --- GSC FILTERING ---
+            # We sturen nu de GECONVOLUEERDE CHUNKS (t_comp en i_comp) rechtstreeks naar de functie!
             gsc_out_mix, mic, _, _, out_tar, out_int, _, _ = gsc_fd(
-                scenario, speech_paths, noise_paths, duration=10.0, mu=0.005
+                scenario, 
+                precomputed_speech=t_comp, 
+                precomputed_noise=i_comp, 
+                mu=0.1
             )
             
             full_mix_out.append(gsc_out_mix)
@@ -417,4 +420,4 @@ if __name__ == "__main__":
         sf.write(os.path.join(parent_dir, f"01_Origineel_Mic1_{safe_label}.wav"), final_mic_in / np.max(np.abs(final_mic_in)), fs)
         sf.write(os.path.join(parent_dir, f"02_Gefilterd_GSC_{safe_label}.wav"), final_output / np.max(np.abs(final_output)), fs)
         
-        print(f"\n✅ Verwerking {reverb_label} voltooid! Audio opgeslagen.")
+        print(f"\n Verwerking {reverb_label} voltooid! Audio opgeslagen.")
