@@ -16,38 +16,11 @@ from package import load_rirs
 from package.utils import create_micsigs as original_create_micsigs
 
 
-def modified_create_micsigs(scenario, speech_paths, noise_paths=None, duration=10.0):
-    if noise_paths is None:
-        noise_paths = []
 
-    if scenario.fs != 44100:
-        raise ValueError(f"Fout: De samplingfrequentie is {scenario.fs} Hz. Dit moet 44.1 kHz zijn!")
-
-    _, speech, _ = original_create_micsigs(scenario, speech_paths, [], duration=duration)
-    
-    if len(noise_paths) > 0:
-        _, _, gui_noise = original_create_micsigs(scenario, speech_paths, noise_paths, duration=duration)
-    else:
-        gui_noise = np.zeros_like(speech)
-
-    vad = np.abs(speech[:, 0]) > (np.std(speech[:, 0]) * 1e-3)
-    Ps = np.var(speech[vad == 1, 0])
-    
-    white_noise_power = 0.10 * Ps
-    white_noise = np.random.randn(*speech.shape) * np.sqrt(white_noise_power)
-    noise = white_noise + gui_noise
-    
-    mic = speech + noise
-    Pn = np.var(noise[:, 0])
-    SNR_in = 10 * np.log10(Ps / Pn)
-    
-    print(f"[Info] Input SNR (Microfoon 1): {SNR_in:.2f} dB")
-    
-    return mic, speech, noise, SNR_in, vad
 def music_wideband(micsigs, fs, acoustic_scenario):
   
     L = 1024
-    overlap = L // 2
+    overlap = L // 1.5
     
     stft_list = []
     for m in range(micsigs.shape[1]):
@@ -72,7 +45,7 @@ def music_wideband(micsigs, fs, acoustic_scenario):
     # We itereren over bins k = 2 ... L/2. 
     # In Python (0-based) is k=1 (DC) index 0. L/2 is index 512 (Nyquist).
     # De indices 1 t/m 511 komen exact overeen met k=2 ... L/2
-    valid_indices = range(1, L // 2)
+    valid_indices = range(1+L//15, L // 3)
     pseudospectra = []
     
     for k in valid_indices:
@@ -170,19 +143,39 @@ def build_lut_for_target(target_rir, L=1024):
             
     return W_FAS, B_matrix
 
-def gsc_fd(scenario, speech_paths=None, noise_paths=None, duration=10.0, mu=0.1, precomputed_speech=None, precomputed_noise=None, vad_threshold=0.1):
+def build_lut_all_angles(all_rirs_dict, angles, L=1024):
+    """
+    Bouwt een LUT van W_FAS en B voor elke DOA-hoek op basis van RIRs.
+    Normaliseert h(w, theta) t.o.v. mic 1.
+    """
+    lut = {}
+    for angle in angles:
+        rir = all_rirs_dict[angle]
+        # Hergebruik je bestaande logica voor 1 specifieke RIR
+        W_FAS, B = build_lut_for_target(rir, L=L)
+        lut[angle] = (W_FAS, B)
+    return lut
+
+def gsc_fd(scenario, estimated_doa, lut, precomputed_speech, precomputed_noise, mu=0.1):
     speech = precomputed_speech
     noise = precomputed_noise
     mic = speech + noise
+
+    lut_angles = np.array(list(lut.keys()))
+    closest_angle = lut_angles[np.argmin(np.abs(lut_angles - estimated_doa))]
+    W_FAS_lut, B_lut = lut[closest_angle]
+    
+    print(f"   [GSC] Gebruikte DOA uit LUT: {closest_angle}° (geschat: {estimated_doa:.1f}°)")
+
     snr_in = 10 * np.log10(np.var(speech[:, 0]) / np.var(noise[:, 0]))
+
+    vad = np.abs(speech[:, 0]) > (np.std(speech[:, 0]) * 0.1)
     
     N_samples, M_mics = mic.shape
     L = 1024
     overlap = L // 2
     window_sqrthann = np.sqrt(signal.windows.hann(L, sym=False))
-    target_rir = get_target_rir_from_scenario(scenario, source_index=0)
-
-    W_FAS_lut, B_lut = build_lut_for_target(target_rir, L=L)
+  
 
     _, _, Zxx_mix = signal.stft(mic.T, fs=scenario.fs, window=window_sqrthann, nperseg=L, noverlap=overlap)
     _, _, Zxx_tar = signal.stft(speech.T, fs=scenario.fs, window=window_sqrthann, nperseg=L, noverlap=overlap)
@@ -190,23 +183,18 @@ def gsc_fd(scenario, speech_paths=None, noise_paths=None, duration=10.0, mu=0.1,
     
     nF, nT = Zxx_mix.shape[1], Zxx_mix.shape[2]
 
-#  SUBBAND VAD OP MICROFOON 1 
-    # microfoon 1 (index 0) om de VAD wiskunde in 2D te houden
-    Zxx_tar_mic1 = Zxx_tar[0, :, :]
-    
-    # Bereken de drempelwaarde per frequentie-bin (k) over de tijds-as (as 1)
-    thresholds = np.std(np.abs(Zxx_tar_mic1), axis=1, keepdims=True) * vad_threshold + 1e-6
-    
-    # Maak een 2D-matrix met True/False voor elke frequentie (k) en elk frame (n)
-    VAD_FD = np.abs(Zxx_tar_mic1) > thresholds
+    vad_frames = np.zeros(nT)
+    samples_per_frame = L - overlap
+    for n in range(nT):
+        start_idx = n * samples_per_frame
+        end_idx = start_idx + L
+        if end_idx <= N_samples:
+            vad_frames[n] = 1 if np.mean(vad[start_idx:end_idx]) > 0.5 else 0
 
-    # Print statistieken
-    actieve_bins = np.sum(VAD_FD)
-    totaal_bins = nF * nT
-    percentage_spraak = (actieve_bins / totaal_bins) * 100
+    actieve_frames = np.sum(vad_frames)
+    percentage_spraak = (actieve_frames / nT) * 100
     percentage_adaptatie = 100 - percentage_spraak
-    print(f"   [VAD-FD] Drempel {vad_threshold} -> Spraak in {percentage_spraak:.1f}% | Filter leert in {percentage_adaptatie:.1f}% van de bins.")
-    
+    print(f"  Spraak in {percentage_spraak:.1f}% van de frames | Filter leert in {percentage_adaptatie:.1f}% van de tijd.")
 
     E_out_mix = np.zeros((nF, nT), dtype=complex)
     E_out_tar = np.zeros((nF, nT), dtype=complex) 
@@ -240,8 +228,7 @@ def gsc_fd(scenario, speech_paths=None, noise_paths=None, duration=10.0, mu=0.1,
             u_int = B_k @ x_int
             E_out_int[k, n] = y_fas_int - np.vdot(w_nlms, u_int) 
 
-            # We updaten het filter alleen als er in DEZE bin (k) en DIT frame (n) geen spraak is!
-            if VAD_FD[k, n] == False:
+            if vad_frames[n] == 0:
                 power = np.vdot(u_mix, u_mix).real
                 w_nlms += mu * u_mix * np.conj(e_mix) / (power + eps)
 
@@ -320,6 +307,17 @@ if __name__ == "__main__":
             rir_files = ["160_20_no_reverb.pkl", "140_40_no_reverb.pkl", "120_60_no_reverb.pkl", "100_40_no_reverb.pkl", "95_85_no_reverb.pkl"]
         else:
             rir_files = ["160_20_reverb.pkl", "140_40_reverb.pkl", "120_60_reverb.pkl", "100_40_reverb.pkl", "95_85_reverb.pkl"]
+
+        all_rirs_dict = {}
+        lut_angles_list = []
+        for rir_file in rir_files:
+            scenario_tmp = load_rirs(os.path.join(parent_dir, "rirs", rir_file))
+            angle_deg = float(rir_file.split("_")[0])
+            all_rirs_dict[angle_deg] = scenario_tmp.RIRs_audio[:, :, 0] # Sla target RIR op
+            lut_angles_list.append(angle_deg)
+
+        lut = build_lut_all_angles(all_rirs_dict, lut_angles_list, L=1024)
+
         
         full_mix_out = []
         full_mic_in = [] 
@@ -355,15 +353,17 @@ if __name__ == "__main__":
             _, _, _, est_doas, _ = music_wideband(mic_mix, fs, scenario)
             print(f"   [DOA] MUSIC detecteert bronnen op: {est_doas}°")
             
-            # --- GSC FILTERING ---
+    
+            target_doa_est = np.max(est_doas)
+         
             speech_paths = [os.path.join(parent_dir, "sound_files", "part1_track1_dry.wav")]
             noise_paths = [os.path.join(parent_dir, "sound_files", "part1_track2_dry.wav")]
             
-            # Voer GSC uit (gebruikt RIR van het huidige scenario)
-           # --- GSC FILTERING ---
-            # We sturen nu de GECONVOLUEERDE CHUNKS (t_comp en i_comp) rechtstreeks naar de functie!
+       
             gsc_out_mix, mic, _, _, out_tar, out_int, _, _ = gsc_fd(
                 scenario, 
+                estimated_doa=target_doa_est, 
+                lut=lut,                      
                 precomputed_speech=t_comp, 
                 precomputed_noise=i_comp, 
                 mu=0.1
@@ -420,4 +420,4 @@ if __name__ == "__main__":
         sf.write(os.path.join(parent_dir, f"01_Origineel_Mic1_{safe_label}.wav"), final_mic_in / np.max(np.abs(final_mic_in)), fs)
         sf.write(os.path.join(parent_dir, f"02_Gefilterd_GSC_{safe_label}.wav"), final_output / np.max(np.abs(final_output)), fs)
         
-        print(f"\n Verwerking {reverb_label} voltooid! Audio opgeslagen.")
+        print(f"\n Verwerking {reverb_label} voltooid! Audio opgeslagen.") 
