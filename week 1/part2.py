@@ -4,6 +4,10 @@ import soundfile as sf
 import scipy.signal as signal
 from scipy.signal import find_peaks
 import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 from package import load_rirs, select_latest_rir, check_plot_tdoas
 
 # --- NIEUWE FUNCTIE: ANALYSEER AUTOCORRELATIE ---
@@ -104,15 +108,7 @@ def create_micsigs(acoustic_scenario, speech_filenames, noise_filenames, duratio
         
         for mic_idx in range(num_mics):
             rir = acoustic_scenario.RIRs_audio[:, mic_idx, src_idx]
-            filt = signal.fftconvolve(audio, rpe[1]
-    target_peaks = force_num_peaks if force_num_peaks else acoustic_scenario.RIRs_audio.shape[2]
-
-    pos = acoustic_scenario.micPos
-    if pos.shape[0] == 3: d = np.sqrt(np.sum((pos[:, 0] - pos[:, 1])**2))
-    else: d = np.sqrt(np.sum((pos[0] - pos[1])**2))
-    limit_samples = int(np.ceil((d / c) * fs)) + 2 
-
-    mics, _, _ = create_micsigs(acoustic_scenariir, mode='full')[:num_samples]
+            filt = signal.fftconvolve(audio, rir, mode='full')[:num_samples]
             speech_sig[:, mic_idx] += filt
 
     return speech_sig, None, None
