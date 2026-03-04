@@ -14,6 +14,7 @@ sys.path.append(parent_dir)
 
 from package import load_rirs
 from package.utils import create_micsigs as original_create_micsigs
+from package.utils import calculate_ground_truth_doas
 
 
 def modified_create_micsigs(scenario, speech_paths, noise_paths=None, duration=10.0):
@@ -45,15 +46,20 @@ def modified_create_micsigs(scenario, speech_paths, noise_paths=None, duration=1
     
     return mic, speech, noise, SNR_in, vad
 def music_wideband(micsigs, fs, acoustic_scenario):
-  
+    """
+    Wideband MUSIC DOA estimator using free-field steering vectors g(ω,θ).
+    The analysis STFT is returned so it can be reused directly in gsc_fd
+    (one analysis serves two purposes, cf. assignment Part 1).
+    """
     L = 1024
     overlap = L // 2
-    
+    window_sqrthann = np.sqrt(signal.windows.hann(L, sym=False))
+
     stft_list = []
     for m in range(micsigs.shape[1]):
-        freqs, _, Zxx = signal.stft(micsigs[:, m], fs=fs, window='hann', nperseg=L, noverlap=overlap)
+        freqs, _, Zxx = signal.stft(micsigs[:, m], fs=fs, window=window_sqrthann, nperseg=L, noverlap=overlap)
         stft_list.append(Zxx)
-    stft_data = np.stack(stft_list, axis=0) # Shape: (M, nF, nT)
+    stft_data = np.stack(stft_list, axis=0)  # shape: (M, nF, nT)
     
     M, nF, nT = stft_data.shape
     c = 343.0
@@ -61,7 +67,7 @@ def music_wideband(micsigs, fs, acoustic_scenario):
     num_noise = acoustic_scenario.noisePos.shape[0] if acoustic_scenario.noisePos is not None else 0
     Q = num_audio + num_noise
     print('Q =', Q)
-    angles = np.arange(0, 180.5, 0.5)
+    angles = np.arange(0, 180.5, 0.1)
     rads = np.radians(angles)
     
     # mic coördinaten
@@ -79,14 +85,17 @@ def music_wideband(micsigs, fs, acoustic_scenario):
         # Signaal isoleren voor frequentie k
         Y = stft_data[:, k, :]
         Ryy = (Y @ Y.conj().T) / nT
-        
+        # Diagonal loading: verbetert conditionering in reverberante omgevingen.
+        diag_load = 1e-3 * np.trace(Ryy).real / M
+        Ryy += diag_load * np.eye(M)
+
         # Ruissubruimte bepalen
         _, eigvecs = np.linalg.eigh(Ryy)
-        En = eigvecs[:, :M-Q] 
-        
-        # Steering vector bepalen
+        En = eigvecs[:, :M-Q]
+
+        # Steering vector g(ω,θ): free-field / geometric
         omega = 2 * np.pi * freqs[k]
-        taus = (px * np.sin(rads) + py * np.cos(rads)) / c 
+        taus = (px * np.sin(rads) + py * np.cos(rads)) / c
         A = np.exp(-1j * omega * taus)
         
         # Pseudospectrum P(theta)
@@ -146,47 +155,69 @@ def build_lut_for_target(target_rir, L=1024):
     
     W_FAS = np.zeros((n_bins, M_mics), dtype=complex)
     B_matrix = np.zeros((n_bins, M_mics - 1, M_mics), dtype=complex)
-    
+    H_omega_norm = np.zeros((n_bins, M_mics), dtype=complex)
+
     for k in range(n_bins):
         h_k = H_omega[k, :].reshape(M_mics, 1)
         
-        # Normalizeer naar Mic 1 (index 0)
+        # Normaliseer naar Mic 1 (index 0)
         eps = 1e-12
         A_1 = h_k[0, 0]
         if np.abs(A_1) > eps:
             h_k = h_k / A_1
-            
-        # FAS Beamformer
+
+        H_omega_norm[k, :] = h_k.flatten()
+
+        # FAS Beamformer: w_FAS = h / (hᴴ h)
         denom = (h_k.conj().T @ h_k)[0, 0]
         if np.abs(denom) > eps:
             W_FAS[k, :] = (h_k / denom).flatten()
         else:
             W_FAS[k, :] = np.ones(M_mics) / M_mics
             
-        # Blocking Matrix
+        # Blocking Matrix: B h = 0  via null_space
         Z = scipy.linalg.null_space(h_k.conj().T)
         if Z.shape[1] > 0:
             B_matrix[k, :, :] = Z.conj().T
             
-    return W_FAS, B_matrix
+    return W_FAS, B_matrix, H_omega_norm
 
-def gsc_fd(scenario, speech_paths=None, noise_paths=None, duration=10.0, mu=0.1, precomputed_speech=None, precomputed_noise=None, vad_threshold=0.1):
+def gsc_fd(scenario, speech_paths=None, noise_paths=None, duration=10.0, mu=0.1,
+           precomputed_speech=None, precomputed_noise=None, vad_threshold=0.1,
+           precomputed_stft_mix=None, precomputed_stft_tar=None, precomputed_stft_int=None,
+           target_rir=None):
     speech = precomputed_speech
     noise = precomputed_noise
     mic = speech + noise
     snr_in = 10 * np.log10(np.var(speech[:, 0]) / np.var(noise[:, 0]))
-    
+
     N_samples, M_mics = mic.shape
+    # L en venster identiek aan music_wideband zodat de STFT-data gedeeld kan worden.
     L = 1024
     overlap = L // 2
     window_sqrthann = np.sqrt(signal.windows.hann(L, sym=False))
-    target_rir = get_target_rir_from_scenario(scenario, source_index=0)
 
-    W_FAS_lut, B_lut = build_lut_for_target(target_rir, L=L)
+    # Gebruik DOA-geselecteerde target RIR indien meegegeven, anders fallback op source 0.
+    if target_rir is None:
+        target_rir = get_target_rir_from_scenario(scenario, source_index=0)
+    W_FAS_lut, B_lut, _ = build_lut_for_target(target_rir, L=L)
 
-    _, _, Zxx_mix = signal.stft(mic.T, fs=scenario.fs, window=window_sqrthann, nperseg=L, noverlap=overlap)
-    _, _, Zxx_tar = signal.stft(speech.T, fs=scenario.fs, window=window_sqrthann, nperseg=L, noverlap=overlap)
-    _, _, Zxx_int = signal.stft(noise.T, fs=scenario.fs, window=window_sqrthann, nperseg=L, noverlap=overlap)
+    # Gebruik de precomputed STFT van music_wideband indien beschikbaar
+    # (analyse-deel dient twee doelen: DOA-schatting EN GSC, cf. opdracht Part 1).
+    if precomputed_stft_mix is not None:
+        Zxx_mix = precomputed_stft_mix
+    else:
+        _, _, Zxx_mix = signal.stft(mic.T, fs=scenario.fs, window=window_sqrthann, nperseg=L, noverlap=overlap)
+
+    if precomputed_stft_tar is not None:
+        Zxx_tar = precomputed_stft_tar
+    else:
+        _, _, Zxx_tar = signal.stft(speech.T, fs=scenario.fs, window=window_sqrthann, nperseg=L, noverlap=overlap)
+
+    if precomputed_stft_int is not None:
+        Zxx_int = precomputed_stft_int
+    else:
+        _, _, Zxx_int = signal.stft(noise.T, fs=scenario.fs, window=window_sqrthann, nperseg=L, noverlap=overlap)
     
     nF, nT = Zxx_mix.shape[1], Zxx_mix.shape[2]
 
@@ -350,23 +381,57 @@ if __name__ == "__main__":
             t_comp = np.stack([signal.fftconvolve(chunk_t, target_rir[:,m], mode='full')[:segment_samples] for m in range(5)], axis=1)
             i_comp = np.stack([signal.fftconvolve(chunk_i, interf_rir[:,m], mode='full')[:segment_samples] for m in range(5)], axis=1)
             mic_mix = t_comp + i_comp
-            
-            # --- DOA ESTIMATION & PRINTEN ---
-            _, _, _, est_doas, _ = music_wideband(mic_mix, fs, scenario)
-            print(f"   [DOA] MUSIC detecteert bronnen op: {est_doas}°")
-            
+
+            # Echte DOAs berekenen via de bestaande hulpfunctie (positie in scenario).
+            gt_doas = calculate_ground_truth_doas(scenario)
+            true_doa_tar = gt_doas[0]
+            if scenario.noisePos is not None and len(scenario.noisePos) > 0:
+                class _TmpScenario:
+                    pass
+                tmp = _TmpScenario()
+                tmp.audioPos = scenario.noisePos
+                tmp.micPos = scenario.micPos
+                true_doa_int = calculate_ground_truth_doas(tmp)[0]
+            else:
+                true_doa_int = gt_doas[1]
+            print(f"   [DOA] Echte hoeken : target={true_doa_tar:.1f}°  interferer={true_doa_int:.1f}°")
+
+            # DOA-schatting met g(ω,θ). De STFT van mic_mix wordt gereturnd en
+            # HERGEBRUIKT in gsc_fd (analyse dient twee doelen, cf. opdracht Part 1).
+            window_sqrthann = np.sqrt(signal.windows.hann(1024, sym=False))
+            _, _, _, est_doas, stft_mix = music_wideband(mic_mix, fs, scenario)
+            err_tar = abs(np.sort(est_doas)[np.argmin(np.abs(np.sort(est_doas) - true_doa_tar))] - true_doa_tar)
+            err_int = abs(np.sort(est_doas)[np.argmin(np.abs(np.sort(est_doas) - true_doa_int))] - true_doa_int)
+            print(f"   [DOA] Geschat (g)  : {np.sort(est_doas)}°  (fout: target={err_tar:.1f}°, interferer={err_int:.1f}°)")
+
+            # Koppel de geschatte target-DOA aan de juiste RIR voor de FAS BF LUT.
+            est_doas_sorted = np.sort(est_doas)
+            est_target_doa = est_doas_sorted[-1]  # grootste hoek = links = target
+            dist_to_tar = abs(est_target_doa - true_doa_tar)
+            dist_to_int = abs(est_target_doa - true_doa_int)
+            if dist_to_tar <= dist_to_int:
+                gsc_target_rir = target_rir
+                print(f"   [DOA→RIR] {est_target_doa:.1f}° → target RIR")
+            else:
+                gsc_target_rir = interf_rir
+                print(f"   [DOA→RIR] {est_target_doa:.1f}° → interferer RIR (MUSIC verwisseld!)")
+
+            # STFT van target en interferer (enkel voor SIR-evaluatie).
+            _, _, Zxx_tar = signal.stft(t_comp.T, fs=fs, window=window_sqrthann, nperseg=1024, noverlap=512)
+            _, _, Zxx_int = signal.stft(i_comp.T, fs=fs, window=window_sqrthann, nperseg=1024, noverlap=512)
+
             # --- GSC FILTERING ---
-            speech_paths = [os.path.join(parent_dir, "sound_files", "part1_track1_dry.wav")]
-            noise_paths = [os.path.join(parent_dir, "sound_files", "part1_track2_dry.wav")]
-            
-            # Voer GSC uit (gebruikt RIR van het huidige scenario)
-           # --- GSC FILTERING ---
-            # We sturen nu de GECONVOLUEERDE CHUNKS (t_comp en i_comp) rechtstreeks naar de functie!
+            # Geef de STFT van mix (berekend in music_wideband) direct door aan gsc_fd.
+            # Zo wordt de analyse-STFT maar één keer berekend (cf. opdracht).
             gsc_out_mix, mic, _, _, out_tar, out_int, _, _ = gsc_fd(
-                scenario, 
-                precomputed_speech=t_comp, 
-                precomputed_noise=i_comp, 
-                mu=0.1
+                scenario,
+                precomputed_speech=t_comp,
+                precomputed_noise=i_comp,
+                mu=0.1,
+                precomputed_stft_mix=stft_mix,
+                precomputed_stft_tar=Zxx_tar,
+                precomputed_stft_int=Zxx_int,
+                target_rir=gsc_target_rir,
             )
             
             full_mix_out.append(gsc_out_mix)
