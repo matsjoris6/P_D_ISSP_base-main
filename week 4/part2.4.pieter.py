@@ -170,7 +170,7 @@ def build_lut_for_target(target_rir, L=1024):
             
     return W_FAS, B_matrix
 
-def gsc_fd(scenario, speech_paths=None, noise_paths=None, duration=10.0, mu=0.1, precomputed_speech=None, precomputed_noise=None, vad_threshold=0.1):
+def gsc_fd(scenario, speech_paths=None, noise_paths=None, duration=10.0, mu=0.1, precomputed_speech=None, precomputed_noise=None, vad_threshold=0.001):
     speech = precomputed_speech
     noise = precomputed_noise
     mic = speech + noise
