@@ -4,19 +4,15 @@ import matplotlib.pyplot as plt
 import os
 import sys
 
-# ==========================================
-# 0. SETUP & IMPORTS
-# ==========================================
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
-from package import load_rirs
+from package import load_rirs, select_latest_rir
 from package.utils import create_micsigs
 
-# ==========================================
-# 1. FUNCTIE: BEREKEN WAARHEID
-# ==========================================
+
 def calculate_ground_truth_doas(acoustic_scenario):
     if acoustic_scenario.audioPos is None or len(acoustic_scenario.audioPos) == 0:
         return []
@@ -29,20 +25,17 @@ def calculate_ground_truth_doas(acoustic_scenario):
         dx = source[0] - array_center[0]
         dy = source[1] - array_center[1] 
         
-        # GECORRIGEERD: Gebruik arctan2 geprojecteerd op het specifieke assenstelsel
-        # -dy zorgt dat negatieve y (omhoog) naar 0 graden wijst.
-        # -dx zorgt dat negatieve x (links) naar 90 graden wijst.
+        # -dy zodat negatieve y (omhoog) naar 0 graden wijst.
+        # -dx zodat dat negatieve x (links) naar 90 graden wijst.
         hoek_rad = np.arctan2(-dx, -dy)
         hoek_deg = np.degrees(hoek_rad) % 360
         doas.append(hoek_deg)
         
     return np.array(doas)
 
-# ==========================================
-# 2. FUNCTIE: MUSIC NARROWBAND
-# ==========================================
+
 def music_narrowband(micsigs, fs, acoustic_scenario):
-    # 1. STFT berekenen (L=1024, 50% overlap)
+    #  STFT  (L=1024, 50% overlap)
     L = 1024
     overlap = L // 2
     stft_list = []
@@ -54,10 +47,10 @@ def music_narrowband(micsigs, fs, acoustic_scenario):
     M, nF, nT = stft_data.shape
     c = 343.0
     
-    # 2. Bepaal aantal bronnen Q
+    # aantal bronnen Q
     Q = acoustic_scenario.audioPos.shape[0] if acoustic_scenario.audioPos is not None else 1
     
-    # 3. Selecteer de frequentiebin met het hoogste vermogen (Boven 0Hz!)
+    # Selecteer de frequentiebin met het hoogste vermogen (Boven 0Hz)
     freqs = np.fft.rfftfreq(2*(nF-1), 1/fs)
     power_spectrum = np.mean(np.abs(stft_data)**2, axis=(0, 2))
     
@@ -70,25 +63,24 @@ def music_narrowband(micsigs, fs, acoustic_scenario):
     f_val = freqs[max_bin_idx]
     omega = 2 * np.pi * f_val
 
-    # 4. Bereken ruimtelijke covariantiematrix Ryy
+    #  ruimtelijke covariantiematrix Ryy
     Y = stft_data[:, max_bin_idx, :]
     Ryy = (Y @ Y.conj().T) / nT
     
-    # 5. Eigen-decompositie en Noise Subspace E(omega)
+    #  Eigen-decompositie en Noise Subspace E(omega)
     eigvals, eigvecs = np.linalg.eigh(Ryy)
     En = eigvecs[:, :M-Q] 
     
-    # 6. Pseudospectrum berekenen
     angles = np.arange(0, 180.5, 0.5)
     rads = np.radians(angles)
     
-    # GECORRIGEERD: Gebruik de échte (x,y) coördinaten van de microfoons 
+    # (x,y) coördinaten van de microfoons 
     # ten opzichte van het array-centrum om de steering vector op te bouwen.
     mics_centered = acoustic_scenario.micPos - np.mean(acoustic_scenario.micPos, axis=0)
     px = mics_centered[:, 0].reshape(-1, 1) # X-coördinaten
     py = mics_centered[:, 1].reshape(-1, 1) # Y-coördinaten
     
-    # Dit berekent de vertraging (tau) perfect voor élke geometrie
+    #  berekent de vertraging (tau) 
     taus = (px * np.sin(rads) + py * np.cos(rads)) / c 
     A = np.exp(-1j * omega * taus)
     
@@ -96,14 +88,14 @@ def music_narrowband(micsigs, fs, acoustic_scenario):
     pseudospectrum = 1.0 / denom
     spectrum_db = 10 * np.log10(pseudospectrum / np.max(pseudospectrum))
     
-    # 7. Identificeer de Q grootste pieken
+    # Q grootste pieken
     peaks_indices, _ = signal.find_peaks(spectrum_db)
     
     if len(peaks_indices) >= Q:
         sorted_peak_indices = peaks_indices[np.argsort(spectrum_db[peaks_indices])][-Q:]
         estimated_doas = np.sort(angles[sorted_peak_indices])
     else:
-        # Robuuste fallback
+        #  fallback
         sorted_all = np.argsort(spectrum_db)[::-1]
         est_idx = []
         for idx in sorted_all:
@@ -114,9 +106,7 @@ def music_narrowband(micsigs, fs, acoustic_scenario):
     
     return angles, spectrum_db, estimated_doas, f_val, np.real(eigvals)
 
-# ==========================================
-# 3. MAIN PROGRAMMA
-# ==========================================
+
 if __name__ == "__main__":
     try:
         rirs_folder = os.path.join(parent_dir, "rirs")
@@ -137,7 +127,7 @@ if __name__ == "__main__":
         angles, spec_clean, est_clean, f_clean, ev_clean = music_narrowband(micsigs_clean, scenario.fs, scenario)
         real_doas = calculate_ground_truth_doas(scenario)
 
-        # ================= PLOTTEN =================
+        #plot
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [2, 1]})
 
         ax1.plot(angles, spec_clean, color='blue', label=f'Ruisvrij (f={f_clean:.1f}Hz)')

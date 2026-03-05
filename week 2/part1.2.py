@@ -5,9 +5,7 @@ import matplotlib.pyplot as plt
 import os
 import sys
 
-# ==========================================
-# 0. SETUP & IMPORTS
-# ==========================================
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
@@ -15,9 +13,7 @@ sys.path.append(parent_dir)
 from package import load_rirs
 from package.utils import create_micsigs
 
-# ==========================================
-# 1. FUNCTIE: BEREKEN WAARHEID
-# ==========================================
+
 def calculate_ground_truth_doa(acoustic_scenario):
     if acoustic_scenario.audioPos is None or len(acoustic_scenario.audioPos) == 0:
         return None
@@ -31,11 +27,9 @@ def calculate_ground_truth_doa(acoustic_scenario):
     cos_theta = np.clip(cos_theta, -1.0, 1.0)
     return np.degrees(np.arccos(cos_theta))
 
-# ==========================================
-# 2. FUNCTIE: MUSIC NARROWBAND
-# ==========================================
+
 def music_narrowband(micsigs, fs, acoustic_scenario):
-    # 1. STFT berekenen
+    #  STFT berekenen
     L = 1024
     overlap = L // 2
     stft_list = []
@@ -47,27 +41,27 @@ def music_narrowband(micsigs, fs, acoustic_scenario):
     M, nF, nT = stft_data.shape
     c, d = 343.0, 0.05
     
-    # 2. Aantal bronnen (Q)
+    #  Aantal bronnen (Q)
     Q = acoustic_scenario.audioPos.shape[0] if acoustic_scenario.audioPos is not None else 0
     
-    # 3. Frequentiebin selectie
+    #  Frequentiebin selectie
     power_spectrum = np.mean(np.abs(stft_data)**2, axis=(0, 2))
     max_bin_idx = np.argmax(power_spectrum[1:]) + 1 
     freqs = np.fft.rfftfreq(2*(nF-1), 1/fs)
     f_val = freqs[max_bin_idx]
     omega = 2 * np.pi * f_val
 
-    # 4. Covariantiematrix Ryy 
+    #  Covariantiematrix Ryy 
     Y = stft_data[:, max_bin_idx, :]
     Ryy = (Y @ Y.conj().T) / nT
     
-    # 5. Eigen-decompositie
+    #  Eigen-decompositie
     eigvals, eigvecs = np.linalg.eigh(Ryy)
     
     # Noise Subspace (En) bevat de M - Q kleinste eigenvectoren
     En = eigvecs[:, :M-Q] 
     
-    # 6. Pseudospectrum berekenen
+    #  Pseudospectrum berekenen
     angles = np.arange(0, 180.5, 0.5)
     rads = np.radians(angles)
     taus = (np.arange(M).reshape(-1, 1) * d * (-np.cos(rads))) / c 
@@ -77,7 +71,7 @@ def music_narrowband(micsigs, fs, acoustic_scenario):
     pseudospectrum = 1.0 / denom
     spectrum_db = 10 * np.log10(pseudospectrum / np.max(pseudospectrum))
     
-    # 7. Piekdetectie
+    #  Piekdetectie
     peaks_indices, _ = signal.find_peaks(spectrum_db)
     if len(peaks_indices) > 0:
         sorted_peak_indices = peaks_indices[np.argsort(spectrum_db[peaks_indices])][-Q:]
@@ -87,9 +81,7 @@ def music_narrowband(micsigs, fs, acoustic_scenario):
     
     return angles, spectrum_db, estimated_doas, f_val, np.real(eigvals)
 
-# ==========================================
-# 3. MAIN PROGRAMMA
-# ==========================================
+
 if __name__ == "__main__":
     try:
         rirs_folder = os.path.join(parent_dir, "rirs")
@@ -126,7 +118,7 @@ if __name__ == "__main__":
         # Plot
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [2, 1]})
 
-        # --- SUBPLOT 1: Pseudospectrum ---
+        # PLOT 1: Pseudospectrum
         ax1.plot(angles, spec_clean, color='blue', alpha=0.5, label=f'Ruisvrij (f={f_clean:.1f}Hz)')
         ax1.plot(angles, spec_noisy, color='orange', label=f'Met Ruis (f={f_noisy:.1f}Hz)')
         
@@ -143,7 +135,7 @@ if __name__ == "__main__":
         ax1.legend(loc='upper left')
         ax1.grid(True, alpha=0.3)
 
-        # --- SUBPLOT 2: Eigenwaarden ---
+        # PLOT 2: Eigenwaarden
         indices = np.arange(1, len(ev_clean) + 1)
         ax2.scatter(indices, ev_clean, color='blue', label='Schoon', marker='o')
         ax2.scatter(indices, ev_noisy, color='orange', label='Met Ruis', marker='x')
@@ -155,7 +147,7 @@ if __name__ == "__main__":
         ax2.legend()
         ax2.grid(True, which="both", ls="-", alpha=0.2)
 
-        # Console Output
+        
         print("\n" + "="*60)
         print(f"DOA ANALYSE")
         print("-" * 60)

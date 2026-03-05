@@ -4,9 +4,7 @@ import matplotlib.pyplot as plt
 import os
 import sys
 
-# ==========================================
-# 0. SETUP & IMPORTS
-# ==========================================
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
@@ -14,15 +12,11 @@ sys.path.append(parent_dir)
 from package import load_rirs
 from package.utils import create_micsigs
 
-# ==========================================
-# 1. FUNCTIE: BEREKEN WAARHEID
-# ==========================================
+
 from package.utils import calculate_ground_truth_doas
-# ==========================================
-# 2. FUNCTIE: MUSIC WIDEBAND
-# ==========================================
+
 def music_wideband(micsigs, fs, acoustic_scenario):
-    # 1. Efficiënte STFT berekening (Vectorized over time)
+    #  STFT berekening 
     L = 1024
     overlap = L // 2
     
@@ -46,9 +40,7 @@ def music_wideband(micsigs, fs, acoustic_scenario):
     px = mics_centered[:, 0].reshape(-1, 1)
     py = mics_centered[:, 1].reshape(-1, 1)
     
-    # We itereren over bins k = 2 ... L/2. 
-    # In Python (0-based) is k=1 (DC) index 0. L/2 is index 512 (Nyquist).
-    # De indices 1 t/m 511 komen exact overeen met k=2 ... L/2
+
     valid_indices = range(1, L // 2)
     pseudospectra = []
     
@@ -73,7 +65,7 @@ def music_wideband(micsigs, fs, acoustic_scenario):
         
     pseudospectra = np.array(pseudospectra) # Shape: (511, len(angles))
     
-    # 2. Geometrisch Gemiddelde (Numeriek stabiele methode) + veel minder gevoelig voor pieken die samensmelten
+    #  Geometrisch Gemiddelde (Numeriek stabiele methode) + veel minder gevoelig voor pieken die samensmelten
     # i.p.v. p1 * p2 * .. pn tot de macht 1/N doen we: exp(mean(log(p))) want veel rekenkrachtiger
     log_p = np.log(pseudospectra)
     p_geom = np.exp(np.mean(log_p, axis=0))
@@ -81,7 +73,7 @@ def music_wideband(micsigs, fs, acoustic_scenario):
     # Normalizeer en naar dB
     spectrum_geom_db = 10 * np.log10(p_geom / np.max(p_geom))
     
-    # 3. Peak Finding op het gemiddelde spectrum
+    #  Peak Finding op het gemiddelde spectrum
     peaks_indices, _ = signal.find_peaks(spectrum_geom_db)
     if len(peaks_indices) >= Q:
         sorted_peak_indices = peaks_indices[np.argsort(spectrum_geom_db[peaks_indices])][-Q:]
@@ -101,9 +93,7 @@ def music_wideband(micsigs, fs, acoustic_scenario):
 
     return angles, ps_ind_db, spectrum_geom_db, estimated_doas
 
-# ==========================================
-# 3. MAIN PROGRAMMA
-# ==========================================
+
 if __name__ == "__main__":
     try:
         rirs_folder = os.path.join(parent_dir, "rirs")
@@ -125,10 +115,10 @@ if __name__ == "__main__":
         angles, ps_ind_db, spec_geom, est_wide, = music_wideband(micsigs_clean, scenario.fs, scenario)
         real_doas = calculate_ground_truth_doas(scenario)
 
-        # ================= PLOTTEN =================
+        # plot
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
 
-        # --- PLOT 1: Alle individuele spectra (zeer transparant) ---
+        #  PLOT 1: Alle individuele spectra (zeer transparant) 
         ax1.plot(angles, ps_ind_db.T, color='gray', alpha=0.03) 
         # Fake lijn voor de legend
         ax1.plot([], [], color='gray', alpha=0.5, label='Individuele bins (k=2 ... L/2)') 
@@ -139,7 +129,7 @@ if __name__ == "__main__":
         ax1.legend()
         ax1.grid(True, alpha=0.3)
 
-        # --- PLOT 2: Geometrisch Gemiddelde ---
+        #  PLOT 2: Geometrisch Gemiddelde
         ax2.plot(angles, spec_geom, color='blue', linewidth=2, label='Geometrisch Gemiddeld Spectrum')
         
         for i, r_doa in enumerate(real_doas):

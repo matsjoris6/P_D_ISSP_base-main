@@ -58,8 +58,8 @@ def create_micsigs(acoustic_scenario, speech_filenames, noise_filenames, duratio
                 
                 L = min(len(filtered), num_samples)
                 noise_component[:L, mic_idx] += filtered[:L]
-    else:
-        print("INFO: Ruis-verwerking overgeslagen (geen bestanden of geen ruis-RIRs gevonden).")
+    #else:
+        #print(" Ruis-verwerking overgeslagen (geen bestanden of geen ruis-RIRs gevonden).")
 
     mic = speech_component + noise_component
 
@@ -181,7 +181,7 @@ def calculate_ground_truth_doas(acoustic_scenario):
     return np.array(doas)
 
 def music_narrowband(micsigs, fs, acoustic_scenario):
-    # 1. STFT berekenen [cite: 10, 11]
+    # 1. STFT berekenen 
     L = 1024
     overlap = L // 2
     stft_list = []
@@ -193,10 +193,10 @@ def music_narrowband(micsigs, fs, acoustic_scenario):
     M, nF, nT = stft_data.shape
     c, d = 343.0, 0.05
     
-    # 2. Aantal bronnen (Q) [cite: 36]
+    # 2. Aantal bronnen (Q)
     Q = acoustic_scenario.audioPos.shape[0] if acoustic_scenario.audioPos is not None else 0
     
-    # 3. Frequentiebin selectie [cite: 14]
+    # 3. Frequentiebin selectie 
     power_spectrum = np.mean(np.abs(stft_data)**2, axis=(0, 2))
     max_bin_idx = np.argmax(power_spectrum[1:]) + 1 
     freqs = np.fft.rfftfreq(2*(nF-1), 1/fs)
@@ -206,14 +206,14 @@ def music_narrowband(micsigs, fs, acoustic_scenario):
     Y = stft_data[:, max_bin_idx, :]
     Ryy = (Y @ Y.conj().T) / nT
     
-    # 5. Eigen-decompositie [cite: 17, 35]
+    # 5. Eigen-decompositie 
     # np.linalg.eigh sorteert van klein naar groot
     eigvals, eigvecs = np.linalg.eigh(Ryy)
     
-    # Noise Subspace (En) bevat de M - Q kleinste eigenvectoren [cite: 116, 117]
+    # Noise Subspace (En) bevat de M - Q kleinste eigenvectoren
     En = eigvecs[:, :M-Q] 
     
-    # 6. Pseudospectrum berekenen [cite: 118, 121]
+    # 6. Pseudospectrum berekenen 
     angles = np.arange(0, 180.5, 0.5)
     rads = np.radians(angles)
     taus = (np.arange(M).reshape(-1, 1) * d * (-np.cos(rads))) / c 
@@ -223,7 +223,7 @@ def music_narrowband(micsigs, fs, acoustic_scenario):
     pseudospectrum = 1.0 / denom
     spectrum_db = 10 * np.log10(pseudospectrum / np.max(pseudospectrum))
     
-    # 7. Piekdetectie [cite: 37, 40]
+    # 7. Piekdetectie 
     peaks_indices, _ = signal.find_peaks(spectrum_db)
     sorted_peak_indices = peaks_indices[np.argsort(spectrum_db[peaks_indices])][-Q:]
     estimated_doas = np.sort(angles[sorted_peak_indices])
