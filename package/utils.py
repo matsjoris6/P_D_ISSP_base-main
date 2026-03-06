@@ -160,25 +160,32 @@ def create_micsigs_modified(acoustic_scenario, speech_filenames, noise_filenames
     return mic, speech_component, noise_component
 
 def calculate_ground_truth_doas(acoustic_scenario):
-    if acoustic_scenario.audioPos is None or len(acoustic_scenario.audioPos) == 0:
-        return []
+    bronnen = []    
+
+    if acoustic_scenario.audioPos is not None and len(acoustic_scenario.audioPos) > 0:
+        bronnen.extend(acoustic_scenario.audioPos)
+
+    if hasattr(acoustic_scenario, 'noisePos') and acoustic_scenario.noisePos is not None and len(acoustic_scenario.noisePos) > 0:
+        bronnen.extend(acoustic_scenario.noisePos)
+      
+    if not bronnen:
+        return np.array([])
     
     mics = acoustic_scenario.micPos       
     array_center = np.mean(mics, axis=0)
     
     doas = []
-    for source in acoustic_scenario.audioPos:
+    for source in bronnen:
         dx = source[0] - array_center[0]
         dy = source[1] - array_center[1] 
         
-        # GECORRIGEERD: Gebruik arctan2 geprojecteerd op het specifieke assenstelsel
         # -dy zorgt dat negatieve y (omhoog) naar 0 graden wijst.
         # -dx zorgt dat negatieve x (links) naar 90 graden wijst.
         hoek_rad = np.arctan2(-dx, -dy)
         hoek_deg = np.degrees(hoek_rad) % 360
         doas.append(hoek_deg)
         
-    return np.array(doas)
+    return np.sort(np.array(doas))
 
 def music_narrowband(micsigs, fs, acoustic_scenario):
     # 1. STFT berekenen 
