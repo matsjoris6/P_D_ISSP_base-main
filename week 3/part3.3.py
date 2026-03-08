@@ -5,9 +5,6 @@ import matplotlib.pyplot as plt
 import os
 import sys
 
-# ==========================================
-# 0. SETUP & IMPORTS
-# ==========================================
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
@@ -16,9 +13,7 @@ from package import load_rirs
 from package.utils import music_wideband
 from package.utils import create_micsigs as original_create_micsigs
 
-# ==========================================
-# 1. FUNCTIE: GEMODIFICEERDE CREATE_MICSIGS
-# ==========================================
+
 def modified_create_micsigs(scenario, speech_paths, noise_paths=None, duration=10.0):
     if noise_paths is None:
         noise_paths = []
@@ -49,9 +44,7 @@ def modified_create_micsigs(scenario, speech_paths, noise_paths=None, duration=1
     return mic, speech, noise, SNR_in, vad
 
 
-# ==========================================
-# 3. FUNCTIE: DAS BEAMFORMER 
-# ==========================================
+
 def das_bf(scenario, speech_paths, noise_paths=None, duration=10.0, show_plot=False):
     if noise_paths is None:
         noise_paths = []
@@ -111,23 +104,19 @@ def das_bf(scenario, speech_paths, noise_paths=None, duration=10.0, show_plot=Fa
 
     return DASout, speechDAS, noiseDAS, SNRoutDAS, mic, aligned_mic, vad, snr_in
 
-# ==========================================
-# 4. FUNCTIE: GSC IN TIME DOMAIN (NLMS)
-# ==========================================
-def gsc_td(scenario, speech_paths, noise_paths=None, duration=10.0):
-    print("\n" + "="*50)
-    print("START GENERALIZED SIDELOBE CANCELER (GSC)")
-    print("="*50)
 
-    # 1. Run DAS BF 
+def gsc_td(scenario, speech_paths, noise_paths=None, duration=10.0):
+  
+
+    #  Run DAS BF 
     DASout, speechDAS, noiseDAS, SNRoutDAS, mic, aligned_mic, vad, snr_in = das_bf(
         scenario, speech_paths, noise_paths, duration=duration, show_plot=False
     )
 
     N_samples, M_mics = aligned_mic.shape
 
-    # 2. Blocking Matrix (Griffiths-Jim)
-    print("[GSC] Genereren van Noise References (Blocking Matrix B)...")
+    #  Blocking Matrix (Griffiths-Jim)
+ 
     B = np.zeros((M_mics - 1, M_mics))
     for i in range(M_mics - 1):
         B[i, 0] = 1
@@ -135,7 +124,7 @@ def gsc_td(scenario, speech_paths, noise_paths=None, duration=10.0):
         
     noise_refs = (B @ aligned_mic.T).T  
 
-    # 3. NLMS Adaptief Filter Instellingen
+    #  NLMS Adaptief Filter Instellingen
     L = 1024
     mu = 0.1
     delta = L // 2
@@ -145,8 +134,6 @@ def gsc_td(scenario, speech_paths, noise_paths=None, duration=10.0):
     W = np.zeros((L, M_mics - 1))
     GSCout = np.zeros(N_samples)
     
-    print(f"[GSC] Start NLMS adaptieve filtering (L={L}, mu={mu}, delta={delta})...")
-    print("[GSC] Dit kan 10 tot 20 seconden duren. Even geduld a.u.b. ☕")
 
     padded_noise = np.pad(noise_refs, ((L-1, 0), (0, 0)))
     eps = 1e-8
@@ -159,9 +146,9 @@ def gsc_td(scenario, speech_paths, noise_paths=None, duration=10.0):
         power = np.sum(X_slice**2)
         W += (mu * e_n / (power + eps)) * X_slice
 
-    print("[GSC] Filtering voltooid!")
+ 
 
-    # 4. SNR Berekenen met VAD op het GSC signaal 
+    #  SNR Berekenen met VAD op het GSC signaal 
     vad_delayed = np.pad(vad, (delta, 0))[:N_samples]
     Pn_gsc = np.var(GSCout[vad_delayed == 0])
     Psn_gsc = np.var(GSCout[vad_delayed == 1])
@@ -171,7 +158,7 @@ def gsc_td(scenario, speech_paths, noise_paths=None, duration=10.0):
     SNRoutGSC = 10 * np.log10(Ps_gsc / Pn_gsc)
     print(f"[GSC] Output SNR: {SNRoutGSC:.2f} dB (Netto Verbetering vs Mic1: {SNRoutGSC - snr_in:.2f} dB)")
 
-    # 5. Plotting
+    #  Plotting
     t = np.arange(N_samples) / scenario.fs
     GSCout_plot = np.pad(GSCout[delta:], (0, delta))
     
@@ -205,9 +192,7 @@ def gsc_td(scenario, speech_paths, noise_paths=None, duration=10.0):
 
     return GSCout, SNRoutGSC, mic, DASout, GSCout_plot, noise_refs
 
-# ==========================================
-# 5. MAIN PROGRAMMA
-# ==========================================
+
 if __name__ == "__main__":
     try:
         rirs_folder = os.path.join(parent_dir, "rirs")
@@ -224,7 +209,7 @@ if __name__ == "__main__":
         ]
         speech_paths = alle_spraak_bestanden[:num_audio]
 
-        # STAP 4 KEUZEMENU: 
+       
         gekozen_ruisbestand = "Babble_noise1.wav" 
         
         alle_ruis_bestanden = [
@@ -232,37 +217,35 @@ if __name__ == "__main__":
         ]
         noise_paths = alle_ruis_bestanden[:num_noise]
 
-        # Voer de volledige GSC uit
+       
         GSCout, SNRoutGSC, mic, DASout, GSCout_plot, noise_refs = gsc_td(scenario, speech_paths, noise_paths, duration=10.0)
 
-        # ----------------------------------------------------
-        # AUDIO EXPORT (Om te luisteren)
-        # ----------------------------------------------------
-        print("\n--- AUDIO BESTANDEN OPSLAAN ---")
+        # Audio opslaan 
+       
         
-        # 1. Origineel Signaal (Mic 1)
+        #  Origineel Signaal (Mic 1)
         mic_audio = mic[:, 0] / np.max(np.abs(mic[:, 0]))
         path_mic = os.path.join(parent_dir, "Luister_01_Origineel_Mic1.wav")
         sf.write(path_mic, mic_audio, scenario.fs)
-        print(f"✅ Mic 1 Audio opgeslagen: {path_mic}")
+        print(f" Mic 1 Audio opgeslagen: {path_mic}")
 
-        # 2. DAS Beamformer Signaal
+        #  DAS Beamformer Signaal
         das_audio = DASout / np.max(np.abs(DASout))
         path_das = os.path.join(parent_dir, "Luister_02_Verbeterd_DAS.wav")
         sf.write(path_das, das_audio, scenario.fs)
-        print(f"✅ DAS Audio opgeslagen: {path_das}")
+        print(f" DAS Audio opgeslagen: {path_das}")
 
-        # 3. GSC Audio opslaan
+        # GSC Audio opslaan
         gsc_audio = GSCout_plot / np.max(np.abs(GSCout_plot))
         path_gsc = os.path.join(parent_dir, "Luister_03_GSC_Filter.wav")
         sf.write(path_gsc, gsc_audio, scenario.fs)
-        print(f"✅ GSC Audio opgeslagen: {path_gsc}")
+        print(f" GSC Audio opgeslagen: {path_gsc}")
 
-        # 4. Blocking Matrix Audio opslaan
+        #  Blocking Matrix Audio opslaan
         bm_audio = noise_refs[:, 0] / np.max(np.abs(noise_refs[:, 0]))
         path_bm = os.path.join(parent_dir, "Luister_04_BlockingMatrix.wav")
         sf.write(path_bm, bm_audio, scenario.fs)
-        print(f"✅ Blocking Matrix Audio opgeslagen: {path_bm}")
+        print(f" Blocking Matrix Audio opgeslagen: {path_bm}")
 
     except Exception as e:
         import traceback

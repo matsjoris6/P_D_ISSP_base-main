@@ -46,7 +46,7 @@ def music_wideband(micsigs, fs, acoustic_scenario):
     # We itereren over bins k = 2 ... L/2. 
     # In Python (0-based) is k=1 (DC) index 0. L/2 is index 512 (Nyquist).
     # De indices 1 t/m 511 komen exact overeen met k=2 ... L/2
-    valid_indices = range(1+L//15, L // 3)
+    valid_indices = range(1, L // 2)
     pseudospectra = []
     
     for k in valid_indices:
