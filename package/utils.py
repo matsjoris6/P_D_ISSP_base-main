@@ -141,11 +141,10 @@ def create_micsigs_modified(acoustic_scenario, speech_filenames, noise_filenames
     noise_component += white_noise
     Pn_actual = np.var(noise_component[:, 0])
     
-    if Pn_actual > 0:
-        snr_mic1 = 10 * np.log10(Ps / Pn_actual)
-        print(f"SNR in de eerste microfoon: {snr_mic1:.2f} dB")
-    else:
-        print("Kan SNR niet berekenen (Ruis is 0).")
+    
+    snr_mic1 = 10 * np.log10(Ps / Pn_actual)
+    print(f"SNR in de eerste microfoon: {snr_mic1:.2f} dB")
+    
 
     mic = speech_component + noise_component
 
