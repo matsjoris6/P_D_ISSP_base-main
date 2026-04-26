@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ISSP Visualization</title>
+
+    <script src="static/d3.v7.min.js"></script>
+    <script src="static/timechart.min.js"></script>
+    <script src="static/socket.io.min.js"></script>
+</head>
+
+<body style="height: 100vh; margin: 0;">
+    <div style="text-align: center;">
+        <button id="follow-button">Follow data</button>
+        <button id="connect-button">Connect to audio</button>
+        <button id="audio-out-button">Audio out</button>
+        <button id="audio-left-button">Audio left</button>
+        <button id="audio-right-button">Audio right</button>
+        <button id="audio-mute-button">No Audio</button>
+    </div>
+
+    <div style="display: flex; height: 30%;">
+        <div style="flex: 1">
+            <div id="gsc_right" style="height: 50%;"></div>
+            <div id="gsc_left" style="height: 50%;"></div>
+        </div>
+        <div style="flex: 1">
+            <div id="doa" style="height: 100%;"></div>
+        </div>
+    </div>
+
+    <div style="display: flex; height: 30%;">
+        <div style="flex: 1">
+            <div id="out" style="height: 100%;"></div>
+        </div>
+        <div style="flex: 1">
+            <div id="snr" style="height: 100%;"></div>
+        </div>
+    </div>
+
+    <div style="height: 30%;">
+        <div id="attended" style="height: 100%;"></div>
+    </div>
+
+    <script src="static/client.js"></script>
+</body>
+
+</html>
