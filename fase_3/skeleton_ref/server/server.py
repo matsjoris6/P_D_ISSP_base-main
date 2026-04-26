@@ -107,6 +107,16 @@ if __name__ == "__main__":
     async def handle_connect():
         print("Client connected")
 
+    # python-socketio 5.16+ vereist een connect handler per namespace
+    # anders worden events op die namespace genegeerd
+    @sio.on("connect", namespace="/worker")
+    async def handle_worker_connect(sid, environ, auth=None):
+        print(f"Worker connected: {sid}")
+
+    @sio.on("connect", namespace="/frontend")
+    async def handle_frontend_connect(sid, environ, auth=None):
+        print(f"Frontend connected: {sid}")
+
     @sio.on("disconnect request")
     async def handle_disconnect(sid):
         await sio.disconnect(sid)
