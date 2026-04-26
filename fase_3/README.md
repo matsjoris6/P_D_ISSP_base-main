@@ -65,38 +65,61 @@ python processing.py \
 |-----------|---------|-------------|
 | `L`       | 512     | STFT-lengte (≈ 32ms bij 16 kHz, vergelijkbaar met week4 op 44.1 kHz) |
 | `hop`     | 256     | 50% overlap, zoals week4 |
-| `beta`    | 0.92    | exp. middeling R_yy. Hoog (0.99) = stabiel, traag adapterend; laag (0.85) = snel maar ruisig |
-| `mu`      | 0.05    | NLMS step (zoals week4) |
+| `beta`    | 0.92    | exp. middeling R_yy. Zie beta-analyse hieronder. |
+| `mu`      | 0.001   | NLMS step. Kleiner dan week4 (0.1) wegens target-leakage bij 16 kHz fase-3 data. |
 | `bin_range` | `auto` | MUSIC bins gelimiteerd onder spatial-aliasing. Voor 16 kHz / 10cm spacing: bins 2-55 (= < 1715 Hz). Met `--bin_range full` exact week4 (1..L/2). |
 | `combine` | `geometric` | pseudospectrum-combiner over bins (= week4) |
 
-## Gemeten week-1 resultaten (pair1, anechoic, 60s)
+## Part 2: Beta-analyse (effect van exponentiële middelingsconstante)
+
+Resultaten pair1, anechoic, 30s (input SIR = ±0.5 dB):
+
+| β    | SIR links (dB) | SIR rechts (dB) | DOA mediaan fout L/R |
+|------|---------------|-----------------|----------------------|
+| 0.80 | +8.10         | +8.70           | ~12° / ~16°         |
+| 0.90 | +8.07         | +8.66           | ~12° / ~15°         |
+| **0.92** | **+8.03** | **+8.78**   | **~12° / ~16°**     |
+| 0.95 | +7.95         | +8.76           | ~12° / ~15°         |
+| 0.99 | +7.91         | +8.89           | ~12° / ~12°         |
+
+- **Laag β (< 0.85)**: snel adapterend bij positieveranderingen, maar R_yy is ruisiger → instabiele DOA-schatting.
+- **Hoog β (> 0.97)**: stabiele R_yy, maar traag bij snelle positieveranderingen (>2s vertraging).
+- **β = 0.92 (default)**: goede balans voor fase-3 data met ~16s segmenten per positie.
+
+## Gemeten week-1 resultaten (pair1, anechoic, 60s, mu=0.001, beta=0.92)
 
 | Metriek | Waarde |
 |---------|--------|
-| Globale SIR links-target | -4 dB |
-| Globale SIR rechts-target | +5 dB |
-| DOA-fout links (LUT-snapped) | ~12° mediaan |
-| DOA-fout rechts (LUT-snapped) | ~15° mediaan |
+| Input SIR mic1 | ±0.5 dB (meting voor BF) |
+| Globale SIR links-target | **+6.9 dB** (+6.4 dB verbetering) |
+| Globale SIR rechts-target | **+10.8 dB** (+11.3 dB verbetering) |
+| DOA-fout links (LUT-snapped, mediaan) | ~12° |
+| DOA-fout rechts (LUT-snapped, mediaan) | ~15° |
 | Real-time factor | ~2.4× (sneller dan real-time) |
 
-> **Opmerking over de DOA-bias**: er zit een systematisch verschil van ~5–10° tussen
-> de raw MUSIC-schatting (free-field geometric model) en de RIR-meet-hoeken die als
-> ground truth dienen. Dit is een conventie-verschil, geen algoritme-fout. De LUT-snap
-> kiest in de meeste gevallen de juiste meet-RIR voor de FD-GSC.
+> **Noot μ vs week4**: week4 gebruikte μ=0.1 op 44.1 kHz anechoïsche kamer-data met statische sprekers.
+> Bij fase-3 data (bewegende sprekers, 16 kHz) zorgt μ=0.05 voor target-leakage in de blocking-matrix
+> waardoor NLMS de target mee-cancelt. μ=0.001 minimaliseert dit: SIR gaat van −4.6 → +6.9 dB.
+
+> **DOA-bias**: er zit een systematisch verschil van ~5–15° tussen de raw MUSIC-schatting
+> (geometrisch free-field model) en de RIR-meet-hoeken (ground truth). Dit is een
+> conventie-verschil, geen algoritmefout. De LUT-snap kiest in de meeste gevallen de
+> juiste RIR voor de FD-GSC.
 
 ## Wat is NIET gewijzigd t.o.v. fase 1 week 4
 
 - Pseudospectrum-combiner (geometrisch gemiddelde over bins)
 - FAS-beamformer + Blocking Matrix berekening (`build_lut_for_target`)
 - NLMS-update regel (per-bin, tijdens niet-target-spraak)
-- VAD-strategie (frame-level + per-bin running mean)
+- VAD-strategie (frame-level: std(frame) > 0.1 × running_max van std)
 - SIR-formule (`compute_sir`, identiek aan `computeSIR.py`)
 
-De enige adaptaties zijn:
+De aanpassingen voor streaming + fase-3 data zijn:
 1. State-management voor streaming (sliding STFT-buffer, per-bin w_nlms persistent)
 2. Exponentiële middeling R_yy (= expliciete vereiste van Part 2)
 3. LUT bouwen uit `lma_16kHz.npz` i.p.v. uit week4's scenario.RIRs_audio (nieuwe data-format)
+4. μ = 0.001 i.p.v. 0.1 (week4) — fase-3 data met bewegende sprekers heeft kleinere stap nodig
+   om target-leakage via blocking matrix te beheersen (zie beta-analyse hierboven)
 
 ## TODO voor volgende weken
 

@@ -29,7 +29,7 @@ DEFAULT_FS = 16000
 DEFAULT_L = 512
 DEFAULT_HOP = 256
 DEFAULT_BETA = 0.92  # exponentiele middeling R_yy (Part 2)
-DEFAULT_MU = 0.05    # NLMS step
+DEFAULT_MU = 0.001   # NLMS step (klein gehouden om target-leakage te vermijden bij 16 kHz data)
 DEFAULT_NUM_MICS_LMA = 5
 
 # Data-pad: kan via env var PHASE3_DATA_DIR geconfigureerd worden, anders default.

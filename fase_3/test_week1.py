@@ -98,7 +98,7 @@ def main():
     parser.add_argument("--L", type=int, default=512, help="STFT-lengte")
     parser.add_argument("--update_rate", type=int, default=32, help="Chunks per seconde (skeleton-default: 32)")
     parser.add_argument("--beta", type=float, default=0.95, help="Exponentiele middelingsconstante voor R_yy")
-    parser.add_argument("--mu", type=float, default=0.05, help="NLMS step")
+    parser.add_argument("--mu", type=float, default=0.001, help="NLMS step")
     parser.add_argument("--doa_update_every", type=int, default=4, help="Update DOA elke N chunks (1/8 sec bij 32 chunks/s)")
     parser.add_argument("--bin_range", type=str, default="auto",
                         help="MUSIC bin range 'k_min,k_max' of 'auto' (= onder aliasing-limiet) of 'full' (1..L/2 zoals week4)")

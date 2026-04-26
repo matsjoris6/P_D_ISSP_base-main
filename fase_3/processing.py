@@ -133,7 +133,7 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, default=None,
                         help="Pad naar audio-data scenario (bv .../anechoic). Bepaalt welke RIRs voor LUT.")
     parser.add_argument("--beta", type=float, default=0.92, help="Exp. R_yy averaging voor MUSIC")
-    parser.add_argument("--mu", type=float, default=0.05, help="NLMS step voor FD-GSC")
+    parser.add_argument("--mu", type=float, default=0.001, help="NLMS step voor FD-GSC")
     parser.add_argument("--bin_range", type=str, default="auto",
                         help="MUSIC bin range: 'auto'|'full'|'k_min,k_max'")
     args = parser.parse_args()

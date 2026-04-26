@@ -63,11 +63,9 @@ class StreamingFDGSC:
         # NLMS state per bin (behouden tussen chunks; ook bij DOA-update)
         self.w_nlms = np.zeros((self.n_bins, M_mics - 1), dtype=complex)
 
-        # Running max van target-frame energie (mic 1) voor adaptive VAD
+        # Running max van target-frame energie (mic 1) voor frame-level VAD
+        # (streaming-equivalent van week4's `np.std(speech[:,0]) * 0.1` op heel signaal)
         self._tar_energy_max = 1e-6
-        # Per-bin running gem. van |X_tar| voor subband-VAD (zoals week4)
-        self._tar_bin_running = np.zeros(self.n_bins, dtype=np.float64)
-        self._tar_bin_count = 0
 
         # Sliding input-buffers (mix, target, interferer) per kanaal
         self.buf_mix = np.zeros((0, M_mics), dtype=np.float64)
@@ -78,6 +76,11 @@ class StreamingFDGSC:
         self.tail_mix = np.zeros(L, dtype=np.float64)
         self.tail_tar = np.zeros(L, dtype=np.float64)
         self.tail_int = np.zeros(L, dtype=np.float64)
+
+        # Output samples die over zijn van vorige chunk (om sample-verlies te voorkomen)
+        self._pending_mix = np.zeros(0, dtype=np.float64)
+        self._pending_tar = np.zeros(0, dtype=np.float64)
+        self._pending_int = np.zeros(0, dtype=np.float64)
 
         # Huidige LUT-hoek
         self.current_angle = None
@@ -158,22 +161,19 @@ class StreamingFDGSC:
             E_tar = np.zeros(self.n_bins, dtype=complex)
             E_int = np.zeros(self.n_bins, dtype=complex)
 
-            # Frame-level VAD op target-mic1 (tijddomein): "is target actief?"
-            # Adaptieve drempel: vergelijk frame-energie met running max.
+            # Frame-level VAD op target-mic1 (tijddomein): exact zoals week4.ipynb,
+            # maar streaming-equivalent voor de drempel. Week4:
+            #   vad = |speech[:,0]| > 0.1 * std(speech[:,0])
+            #   vad_frames[n] = mean(vad[frame]) > 0.5
+            # In streaming weten we std(speech) niet a priori; we gebruiken een
+            # running max van per-frame std als adaptieve drempel.
             if do_oracle:
                 tar_frame_t = self.buf_tar[: self.L, 0]
-                tar_frame_energy = float(np.std(tar_frame_t))
-                # decay running max zodat we ons aanpassen aan stillere segmenten
-                self._tar_energy_max = max(self._tar_energy_max * 0.9999, tar_frame_energy)
-                target_active = tar_frame_energy > self.vad_threshold * self._tar_energy_max
-
-                # Per-bin running gem voor subband-VAD (week4 stijl)
-                tar_bin_mag = np.abs(X_tar[:, 0])  # mic 1, shape (n_bins,)
-                self._tar_bin_count += 1
-                self._tar_bin_running += (tar_bin_mag - self._tar_bin_running) / self._tar_bin_count
+                tar_frame_std = float(np.std(tar_frame_t))
+                self._tar_energy_max = max(self._tar_energy_max * 0.9999, tar_frame_std)
+                target_active = tar_frame_std > self.vad_threshold * self._tar_energy_max
             else:
                 target_active = True  # zonder oracle: conservatief geen update
-                tar_bin_mag = None
 
             for k in range(self.n_bins):
                 w_fas_k = self.W_FAS[k, :]
@@ -197,15 +197,12 @@ class StreamingFDGSC:
                     u_int = B_k @ x_int_k
                     E_int[k] = y_fas_int - np.vdot(self.w_nlms[k], u_int)
 
-                    # Per-bin VAD: deze bin is "stil" als target-magnitude << gemiddelde
-                    bin_silent = tar_bin_mag[k] < self.vad_threshold * (self._tar_bin_running[k] + 1e-6)
-                    # Update alleen als (frame stil) OF (bin stil binnen actief frame)
-                    if (not target_active) or bin_silent:
-                        power = np.vdot(u_mix, u_mix).real
-                        self.w_nlms[k] += self.mu * u_mix * np.conj(e_mix) / (power + eps)
-                else:
-                    # Geen oracle beschikbaar -> conservatief: geen NLMS-update deze frame
-                    pass
+                # NLMS-update alleen als frame STIL is voor target (week4 voorwaarde:
+                # vad_frames[n] == 0). Geen per-bin VAD toegevoegd — dat zou afwijken
+                # van week4 en kan divergentie veroorzaken op bins waar target sparse is.
+                if (not target_active):
+                    power = np.vdot(u_mix, u_mix).real
+                    self.w_nlms[k] += self.mu * u_mix * np.conj(e_mix) / (power + eps)
 
             # iSTFT van deze frame -> tijddomein L samples (gewindowed)
             time_mix = np.fft.irfft(E_mix, n=self.L) * self.window
@@ -258,23 +255,28 @@ class StreamingFDGSC:
                 if self.buf_int.shape[0] >= self.hop:
                     self.buf_int = self.buf_int[self.hop :, :]
 
-        # plak alle ready samples aaneen
-        out_mix = np.concatenate(out_mix_collected) if out_mix_collected else np.zeros(0)
-        out_tar = np.concatenate(out_tar_collected) if out_tar_collected else np.zeros(0)
-        out_int = np.concatenate(out_int_collected) if out_int_collected else np.zeros(0)
+        # Voeg nieuwe ready samples toe aan pending output-buffers (geen verlies)
+        if out_mix_collected:
+            self._pending_mix = np.concatenate([self._pending_mix] + out_mix_collected)
+            self._pending_tar = np.concatenate([self._pending_tar] + out_tar_collected)
+            self._pending_int = np.concatenate([self._pending_int] + out_int_collected)
 
-        # We willen exact n_in samples teruggeven. Trim of pad met stilte (warmup).
-        if out_mix.shape[0] >= n_in:
-            ret_mix = out_mix[:n_in]
-            ret_tar = out_tar[:n_in]
-            ret_int = out_int[:n_in]
-            # restant blijft niet bewaard -- volgende call genereert nieuwe samples
-            # (algoritmisch delay = L samples warmup, daarna 1-op-1)
+        # We willen exact n_in samples teruggeven. Pad met NaN/0 zolang er warmup is.
+        if self._pending_mix.shape[0] >= n_in:
+            ret_mix = self._pending_mix[:n_in].copy()
+            ret_tar = self._pending_tar[:n_in].copy()
+            ret_int = self._pending_int[:n_in].copy()
+            self._pending_mix = self._pending_mix[n_in:]
+            self._pending_tar = self._pending_tar[n_in:]
+            self._pending_int = self._pending_int[n_in:]
         else:
-            pad_n = n_in - out_mix.shape[0]
-            ret_mix = np.concatenate([np.zeros(pad_n), out_mix])
-            ret_tar = np.concatenate([np.full(pad_n, np.nan), out_tar])
-            ret_int = np.concatenate([np.full(pad_n, np.nan), out_int])
+            pad_n = n_in - self._pending_mix.shape[0]
+            ret_mix = np.concatenate([np.zeros(pad_n), self._pending_mix])
+            ret_tar = np.concatenate([np.full(pad_n, np.nan), self._pending_tar])
+            ret_int = np.concatenate([np.full(pad_n, np.nan), self._pending_int])
+            self._pending_mix = np.zeros(0, dtype=np.float64)
+            self._pending_tar = np.zeros(0, dtype=np.float64)
+            self._pending_int = np.zeros(0, dtype=np.float64)
 
         self.n_output_emitted += n_in
         return ret_mix, ret_tar, ret_int
