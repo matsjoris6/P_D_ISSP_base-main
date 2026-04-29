@@ -1,0 +1,7 @@
+cd fase_3/skeleton/server
+python server.py --microarray_path "../data/phase3_audioData/audiodata_batch_1/anechoic" --eeg_data_path "../data/data_phase3" --stimuli_path "../data/data_phase3/stimuli"
+
+
+
+cd fase_3/skeleton
+python processing.py --pair_no 1 --subject_no 2
