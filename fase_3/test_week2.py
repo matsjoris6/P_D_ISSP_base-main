@@ -178,13 +178,16 @@ def test_aad_lstm(aad_model_path, fs_audio=16000, fs_eeg=128,
 
 
 # ---------------------------------------------------------------------------
-# Test 3 — Volledige Processor
+# Test 3 — Volledige Processor + output opslaan
 # ---------------------------------------------------------------------------
 
 def test_processor(microarray_dir, pair_no, aad_model_path=None,
-                   duration_s=5.0, scenario="anechoic"):
+                   duration_s=30.0, scenario="anechoic", out_dir=None):
     print("\n=== Test 3: Volledige Processor (week 1 + 2) ===")
 
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
     from processor import Processor
 
     # Gebruik AAD model alleen als TensorFlow beschikbaar is
@@ -213,63 +216,141 @@ def test_processor(microarray_dir, pair_no, aad_model_path=None,
         aad_window_s=5.0,
         aad_hop_s=1.0,
     )
-    print(f"  Processor aangemaakt ({'met AAD model' if aad_model_path and os.path.exists(aad_model_path or '') else 'placeholder AAD'})")
+    aad_label = "met AAD model" if aad_model_path and os.path.exists(aad_model_path or "") else "placeholder AAD"
+    print(f"  Processor aangemaakt ({aad_label})")
 
-    # Simuleer chunks (32 chunks/s zoals het skeleton)
+    # Chunk-parameters (32 chunks/s zoals het skeleton)
     chunk_size = fs // 32
     n_chunks = n_samples // chunk_size
-
-    # Synthetische EEG (128Hz, 64 kanalen)
+    EEG_ACCUMULATE = 32   # 1s @ 32 chunks/s
     eeg_fs = 128
     eeg_chunk_size = eeg_fs // 32  # 4 EEG-samples per chunk
     eeg_full = np.random.randn(n_chunks * eeg_chunk_size, 64).astype(np.float64)
-
-    # Audio-streams voor AAD (clean, 1s per keer -- processing.py accumulteert 32 chunks)
-    audio_chunk_size = fs // 32
     audio_l_full = lft[:, 0].astype(np.float32) if lft.ndim > 1 else lft.astype(np.float32)
     audio_r_full = rgt[:, 0].astype(np.float32) if rgt.ndim > 1 else rgt.astype(np.float32)
 
-    phase1_count = 0
-    phase2_count = 0
-    phase3_count = 0
-    EEG_ACCUMULATE = 32  # 1s @ 32 chunks/s
+    # Collectie-buffers
+    log_t         = []
+    log_doa_left  = []
+    log_doa_right = []
+    log_sir       = []
+    log_aad       = []
+    log_speaker   = []
+    out_left_chunks   = []
+    out_right_chunks  = []
+    out_signal_chunks = []
 
+    t_start = time.time()
     for ci in range(n_chunks):
         s = ci * chunk_size
         e = s + chunk_size
-        chunk_lma = mix[s:e]
-        chunk_lft = lft[s:e]
-        chunk_rgt = rgt[s:e]
 
-        # Phase 1: microarray processing (synchroon)
-        proc.processing_microarray(chunk_lma, chunk_lft, chunk_rgt)
+        proc.processing_microarray(mix[s:e], lft[s:e], rgt[s:e])
 
-        # Phase 2: EEG + audio (elke 32 chunks = 1s, zoals processing.py)
         if (ci + 1) % EEG_ACCUMULATE == 0:
-            window_start = (ci + 1 - EEG_ACCUMULATE) * eeg_chunk_size
-            window_end = (ci + 1) * eeg_chunk_size
-            eeg_win = eeg_full[window_start:window_end]
-            audio_l_win = audio_l_full[s + chunk_size - fs : s + chunk_size] if s + chunk_size >= fs else audio_l_full[:fs]
-            audio_r_win = audio_r_full[s + chunk_size - fs : s + chunk_size] if s + chunk_size >= fs else audio_r_full[:fs]
-            proc.processing_eeg_gt_audio(eeg_win, audio_l_win, audio_r_win)
+            ws = (ci + 1 - EEG_ACCUMULATE) * eeg_chunk_size
+            we = (ci + 1) * eeg_chunk_size
+            eeg_win = eeg_full[ws:we]
+            al = audio_l_full[s + chunk_size - fs : s + chunk_size] if s + chunk_size >= fs else audio_l_full[:fs]
+            ar = audio_r_full[s + chunk_size - fs : s + chunk_size] if s + chunk_size >= fs else audio_r_full[:fs]
+            proc.processing_eeg_gt_audio(eeg_win, al, ar)
 
-    # Drain queues
-    while not proc.data_queue_phase1.empty():
-        proc.data_queue_phase1.get_nowait()
-        phase1_count += 1
-    while not proc.data_queue_phase2.empty():
-        proc.data_queue_phase2.get_nowait()
-        phase2_count += 1
-    while not proc.data_queue_phase3.empty():
-        proc.data_queue_phase3.get_nowait()
-        phase3_count += 1
+        # Drain phase 1 (GSC + DOA + SIR)
+        while not proc.data_queue_phase1.empty():
+            bl, br, doa_l, doa_r, sir = proc.data_queue_phase1.get_nowait()
+            log_t.append((s + chunk_size / 2) / fs)
+            log_doa_left.append(doa_l)
+            log_doa_right.append(doa_r)
+            log_sir.append(sir)
+            out_left_chunks.append(bl)
+            out_right_chunks.append(br)
 
-    print(f"  Phase 1 (GSC+DOA+SIR) queue: {phase1_count} items  {'✓' if phase1_count > 0 else '✗'}")
-    print(f"  Phase 2 (AAD pred_prob) queue: {phase2_count} items  {'✓' if phase2_count > 0 else '✗'}")
-    print(f"  Phase 3 (output signaal) queue: {phase3_count} items  {'✓' if phase3_count > 0 else '✗'}")
+        # Drain phase 2 (AAD pred_prob)
+        while not proc.data_queue_phase2.empty():
+            log_aad.append(proc.data_queue_phase2.get_nowait())
 
-    assert phase1_count > 0, "Phase 1 queue leeg — GSC/DOA produceert geen output"
-    assert phase3_count > 0, "Phase 3 queue leeg — spreker-selectie produceert geen output"
+        # Drain phase 3 (geselecteerde spreker)
+        while not proc.data_queue_phase3.empty():
+            spk, sig = proc.data_queue_phase3.get_nowait()
+            log_speaker.append(spk)
+            out_signal_chunks.append(sig)
+
+        if (ci + 1) % (EEG_ACCUMULATE * 5) == 0:
+            elapsed = time.time() - t_start
+            print(f"  {(ci+1)/32:.0f}s verwerkt — DOA L/R: {log_doa_left[-1]:.1f}°/{log_doa_right[-1]:.1f}° "
+                  f"— SIR: {log_sir[-1]:.1f} dB — AAD: {log_aad[-1]:.2f}" if log_aad else "")
+
+    elapsed = time.time() - t_start
+    rt = (n_samples / fs) / elapsed
+    print(f"  Klaar: {elapsed:.1f}s voor {n_samples/fs:.0f}s audio (RT factor {rt:.1f}x)")
+
+    # Valideer
+    assert len(out_left_chunks) > 0,   "Phase 1 queue leeg"
+    assert len(out_signal_chunks) > 0, "Phase 3 queue leeg"
+    print(f"  Phase 1: {len(out_left_chunks)} chunks  ✓")
+    print(f"  Phase 2: {len(log_aad)} AAD-updates  {'✓' if log_aad else '(placeholder: OK)'}")
+    print(f"  Phase 3: {len(out_signal_chunks)} chunks  ✓")
+
+    # ---- Output opslaan ----
+    if out_dir is None:
+        out_dir = os.path.join(THIS_DIR, "output", f"pair{pair_no}_{scenario}")
+    os.makedirs(out_dir, exist_ok=True)
+
+    def to_int16(chunks):
+        x = np.concatenate(chunks).astype(np.float64)
+        x = np.nan_to_num(x)
+        peak = np.max(np.abs(x))
+        if peak < 1e-12:
+            return np.zeros(len(x), dtype=np.int16)
+        return (x / peak * 0.95 * 32767).astype(np.int16)
+
+    wavfile.write(os.path.join(out_dir, "w2_gsc_left.wav"),    fs, to_int16(out_left_chunks))
+    wavfile.write(os.path.join(out_dir, "w2_gsc_right.wav"),   fs, to_int16(out_right_chunks))
+    wavfile.write(os.path.join(out_dir, "w2_output_signal.wav"), fs, to_int16(out_signal_chunks))
+
+    # ---- Plot: DOA + SIR + AAD ----
+    t = np.array(log_t)
+    n_rows = 3
+    fig, axes = plt.subplots(n_rows, 1, figsize=(12, 9))
+
+    # DOA
+    axes[0].plot(t, log_doa_left,  label="DOA links (est)",  color="C0")
+    axes[0].plot(t, log_doa_right, label="DOA rechts (est)", color="C1")
+    axes[0].set_ylabel("DOA (graden)")
+    axes[0].set_title(f"Pair {pair_no} {scenario} — week 2 processor output")
+    axes[0].legend()
+    axes[0].grid(True)
+
+    # SIR
+    axes[1].plot(t, log_sir, color="C2", label="SIR actieve spreker")
+    axes[1].set_ylabel("SIR (dB)")
+    axes[1].legend()
+    axes[1].grid(True)
+
+    # AAD pred_prob
+    if log_aad:
+        # AAD wordt 1x per seconde geupdate — maak een tijdsas op die resolutie
+        t_aad = np.arange(len(log_aad), dtype=float) + 1.0
+        axes[2].plot(t_aad, log_aad, color="C3", marker="o", markersize=3,
+                     label="AAD pred_prob (P(attended_left))")
+        axes[2].axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
+        axes[2].set_ylim(-0.05, 1.05)
+        axes[2].set_ylabel("pred_prob")
+        axes[2].legend()
+        axes[2].grid(True)
+    else:
+        axes[2].text(0.5, 0.5, "AAD: geen model (placeholder)",
+                     ha="center", va="center", transform=axes[2].transAxes, fontsize=12)
+        axes[2].set_ylabel("pred_prob")
+
+    axes[-1].set_xlabel("tijd (s)")
+    fig.tight_layout()
+    plot_path = os.path.join(out_dir, "w2_doa_sir_aad.png")
+    fig.savefig(plot_path, dpi=120)
+    plt.close(fig)
+
+    print(f"\n  Plot:  {plot_path}")
+    print(f"  WAVs:  {out_dir}/w2_*.wav")
     print("  [PASS] Processor OK")
 
 
@@ -282,8 +363,8 @@ def main():
     parser.add_argument("--pair", type=int, default=1, help="Pair nummer (default: 1)")
     parser.add_argument("--scenario", type=str, default="anechoic",
                         choices=["anechoic", "reverberant"])
-    parser.add_argument("--duration", type=float, default=5.0,
-                        help="Seconden audio voor processor-test (default: 5s)")
+    parser.add_argument("--duration", type=float, default=30.0,
+                        help="Seconden audio voor processor-test (default: 30s)")
     parser.add_argument("--aad_model_path", type=str, default=None,
                         help="Pad naar hybrid_v3_BEST.keras (optioneel; zonder: placeholder)")
     parser.add_argument("--aad_envelope", type=str, default="gammatone",
@@ -319,7 +400,8 @@ def main():
     test_processor(microarray_dir, args.pair,
                    aad_model_path=args.aad_model_path,
                    duration_s=args.duration,
-                   scenario=args.scenario)
+                   scenario=args.scenario,
+                   out_dir=os.path.join(THIS_DIR, "output", f"pair{args.pair}_{args.scenario}"))
 
     print("\n=== Alle tests geslaagd ✓ ===")
 
