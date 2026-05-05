@@ -1,9 +1,8 @@
-"""Ingevulde versie van het skeleton's processor.py voor fase 3 week 1.
+"""Processor voor fase 3 (week 1 + 2).
 
 Past de algoritmes uit deadline1/week4.ipynb (FD-GSC + MUSIC) toe in streaming-mode op
-de chunks die door processing.py worden aangeleverd. Een LSTM (fase 2) wordt nog niet
-ingebouwd; processing_eeg_gt_audio behoudt de placeholder zodat het skeleton blijft
-draaien tot het dilated+lstm model van Colab binnen is.
+de chunks die door processing.py worden aangeleverd. Integreert optioneel het
+dilated+LSTM AAD model (fase 2) voor live spreker-selectie.
 
 Pipeline-overzicht (per chunk binnenkomst van het skeleton):
     1. processing_microarray(lma, lma_gt_0, lma_gt_1) wordt aangeroepen door processing.py
@@ -12,9 +11,9 @@ Pipeline-overzicht (per chunk binnenkomst van het skeleton):
     4. GSC LINKS: target=spreker0, interferer=spreker1 -> output naar phase1 queue
     5. GSC RECHTS: target=spreker1, interferer=spreker0 -> output naar phase1 queue
     6. SIR per spreker bijwerken (oracle target/interferer paden)
-    7. Phase3 queue: selecteer welke spreker op basis van attended_left (uit fase 2)
+    7. Phase3 queue: selecteer welke spreker op basis van attended_left (AAD of placeholder)
 
-Voor de actual algoritmes: zie fase_3/algorithms/.
+Voor de algoritmes: zie fase_3/algorithms/.
 """
 import asyncio
 import os
@@ -45,11 +44,9 @@ DEFAULT_MU = 0.001   # NLMS-step. Klein t.o.v. week4 (0.1) om target-leakage bij
                      # data met bewegende sprekers te beheersen.
 DEFAULT_NUM_MICS_LMA = 5  # phase 3 LMA = 5 mics
 
-# Data-pad: kan via env var PHASE3_DATA_DIR geconfigureerd worden, anders default.
-DEFAULT_DATA_DIR = os.environ.get(
-    "PHASE3_DATA_DIR",
-    "/Users/macbookmats/Desktop/P_D_ISSP_base-main/fase_3/data/phase3_audioData/audiodata_batch_1/anechoic",
-)
+# Data-pad: instelbaar via env var PHASE3_DATA_DIR of via --data_dir CLI-argument.
+# Geen hardcoded fallback -- processing.py vereist een expliciet pad.
+DEFAULT_DATA_DIR = os.environ.get("PHASE3_DATA_DIR", None)
 
 
 class Processor:

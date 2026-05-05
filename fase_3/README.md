@@ -83,20 +83,28 @@ Genereert in `fase_3/output/pair1_anechoic/`:
 
 ## Volledige skeleton draaien (server + worker)
 
+Verwacht data-structuur onder een `DATA_BASE`-map (bijv. `fase_3/data/`):
+```
+DATA_BASE/
+├── phase3_audioData/audiodata_batch_1/anechoic/   # microarray + RIRs
+├── data_phase3/                                   # EEG data
+└── data_phase3/stimuli/                           # audio stimuli
+```
+
 ```bash
 # Terminal 1: server
 cd fase_3/skeleton_ref/server
 python server.py \
-    --microarray_path /Users/macbookmats/Desktop/.../phase_3/phase3_audioData/audiodata_batch_1/anechoic \
-    --eeg_data_path /Users/macbookmats/Desktop/.../phase_3/data_phase3 \
-    --stimuli_path /Users/macbookmats/Desktop/.../phase_3/data_phase3/stimuli
+    --microarray_path $DATA_BASE/phase3_audioData/audiodata_batch_1/anechoic \
+    --eeg_data_path $DATA_BASE/data_phase3 \
+    --stimuli_path $DATA_BASE/data_phase3/stimuli
 
 # Terminal 2: worker (onze ingevulde versie)
 cd fase_3
 python processing.py \
     --pair_no 1 \
     --subject_no 2 \
-    --data_dir /Users/macbookmats/Desktop/.../phase_3/phase3_audioData/audiodata_batch_1/anechoic
+    --data_dir $DATA_BASE/phase3_audioData/audiodata_batch_1/anechoic
 ```
 
 ## Belangrijke parameters
@@ -284,14 +292,14 @@ doa_0 = np.concatenate([np.repeat(e, n) for e, n in zip(gt["angles_l"], duration
 | AAD predictions altijd 0.5 | Buffer nog niet vol (eerste 5s) | Normaal; eerste 5 chunks geven `last_pred=0.5` default |
 | GT-DOA loopt voor op werkelijkheid | Oude `issp_data.py` zonder bug-fix | Pull laatste mats branch (commit met `np.diff` fix) |
 
-## TODO voor volgende weken
+## Status
 
-- ~~**fase 2 LSTM-integratie**~~ ✅ KLAAR (week 2): `aad_lstm.py` met Gammatone + 5s/1s
-  sliding window. `--aad_model_path fase_3/data/hybrid_v3_BEST.keras`.
-- **AAD switching-stabiliteit**: hysterese rond 0.5-grenswaarde tegen flips bij
-  ambigue predictions (~0.45–0.55 range)
-- **AAD accuracy-meting**: vergelijk live `pred_prob` met oracle `attended_speaker`
-  uit gt-data (server stuurt deze al door; toon avg-accuracy in GUI)
-- **Reverberant scenario systeem-evaluatie** met AAD aan
-- **Multi-subject benchmark**: AAD-accuracy per `--subject_no` parameter
-- Volledige systeem-evaluatie + rapport
+| Onderdeel | Status |
+|-----------|--------|
+| FD-GSC streaming (Part 1) | ✅ |
+| Dynamische MUSIC + DOATracker (Part 2) | ✅ |
+| SIR per frame (Part 3) | ✅ |
+| Twee beamformed streams (Part 4) | ✅ |
+| Live GUI via `run_demo.sh` | ✅ |
+| AAD LSTM+dilated integratie (Week 2) | ✅ |
+| `get_doa_gt` bug-fix (cum-sum → diff) | ✅ |
