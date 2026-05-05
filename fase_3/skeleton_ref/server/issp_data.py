@@ -90,8 +90,13 @@ class ISSPData:
     def get_doa_gt(self, pair_no):
         pair = f"pair{pair_no}"
         gt = np.load(os.path.join(self.microarray_dir, pair, "gt.npz"))
-        doa_0 = np.concatenate([np.repeat(e, n) for e, n in zip(gt["angles_l"], gt["endSamples_l"])])
-        doa_1 = np.concatenate([np.repeat(e, n) for e, n in zip(gt["angles_r"], gt["endSamples_r"])])
+        # endSamples_l/_r zijn cumulatieve sample-posities, niet duraties.
+        # Converteer naar duraties via np.diff voor np.repeat-counts, anders
+        # wordt elke hoek te lang herhaald (cum-sum bug bevestigd door prof).
+        durations_l = np.diff(np.concatenate([[0], gt["endSamples_l"]]))
+        durations_r = np.diff(np.concatenate([[0], gt["endSamples_r"]]))
+        doa_0 = np.concatenate([np.repeat(e, n) for e, n in zip(gt["angles_l"], durations_l)])
+        doa_1 = np.concatenate([np.repeat(e, n) for e, n in zip(gt["angles_r"], durations_r)])
         return doa_0.tolist(), doa_1.tolist()
 
     def _cache_micro(self, pair):

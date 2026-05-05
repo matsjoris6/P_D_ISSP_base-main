@@ -19,7 +19,10 @@ import numpy as np
 # Importeer onze ingevulde Processor
 from processor import Processor
 
-WINDOW_SIZE_SECONDS = 3
+# 1s window-accumulatie zodat AADLSTM elke seconde een hop kan doen op zijn
+# interne 5s sliding-window. Het model verwacht (640, 64) EEG @ 128Hz = 5s.
+# Het AADLSTM-object doet zelf de buffer + window-management.
+WINDOW_SIZE_SECONDS = 1
 UPDATE_RATE = 32
 
 sio = socketio.AsyncClient()
@@ -136,6 +139,16 @@ if __name__ == "__main__":
     parser.add_argument("--mu", type=float, default=0.001, help="NLMS step voor FD-GSC")
     parser.add_argument("--bin_range", type=str, default="auto",
                         help="MUSIC bin range: 'auto'|'full'|'k_min,k_max'")
+    # AAD LSTM (optioneel)
+    parser.add_argument("--aad_model_path", type=str, default=None,
+                        help="Pad naar dilated+LSTM .keras of .h5 model voor AAD. Als niet gegeven: placeholder.")
+    parser.add_argument("--aad_window_s", type=float, default=5.0,
+                        help="AAD predictie-venster in seconden (default 5)")
+    parser.add_argument("--aad_hop_s", type=float, default=1.0,
+                        help="AAD predictie-hop in seconden (default 1)")
+    parser.add_argument("--aad_envelope", type=str, default="gammatone",
+                        choices=["gammatone", "hilbert"],
+                        help="Audio-envelope methode voor AAD")
     args = parser.parse_args()
 
     if args.data_dir is not None:
@@ -151,6 +164,10 @@ if __name__ == "__main__":
         beta=args.beta,
         mu=args.mu,
         bin_range=bin_range,
+        aad_model_path=args.aad_model_path,
+        aad_window_s=args.aad_window_s,
+        aad_hop_s=args.aad_hop_s,
+        aad_envelope=args.aad_envelope,
     )
 
     asyncio.run(main(args.pair_no, args.subject_no))

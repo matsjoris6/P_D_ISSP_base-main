@@ -43,7 +43,7 @@ from algorithms.streaming_sir import StreamingSIR, compute_sir_full
 
 
 # Pad naar de phase 3 audio data (op de Desktop, niet in deze repo)
-DATA_ROOT = "/Users/macbookmats/Desktop/P_D_ISSP_base-main/documents_and_given_code/phase_3/phase3_audioData/audiodata_batch_1"
+DATA_ROOT = "/Users/macbookmats/Desktop/P_D_ISSP_base-main/fase_3/data/phase3_audioData/audiodata_batch_1"
 
 
 def load_pair(pair_no, scenario="anechoic"):

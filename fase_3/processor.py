@@ -48,7 +48,7 @@ DEFAULT_NUM_MICS_LMA = 5  # phase 3 LMA = 5 mics
 # Data-pad: kan via env var PHASE3_DATA_DIR geconfigureerd worden, anders default.
 DEFAULT_DATA_DIR = os.environ.get(
     "PHASE3_DATA_DIR",
-    "/Users/macbookmats/Desktop/P_D_ISSP_base-main/documents_and_given_code/phase_3/phase3_audioData/audiodata_batch_1/anechoic",
+    "/Users/macbookmats/Desktop/P_D_ISSP_base-main/fase_3/data/phase3_audioData/audiodata_batch_1/anechoic",
 )
 
 
@@ -64,7 +64,9 @@ class Processor:
                  beta=DEFAULT_BETA, mu=DEFAULT_MU,
                  doa_update_every=4, bin_range="auto", combine="geometric",
                  sv_model="rir", snr_weight=False, use_fb=None,
-                 doa_tracker_alpha=0.3, doa_tracker_window=5, doa_tracker_outlier=30.0):
+                 doa_tracker_alpha=0.3, doa_tracker_window=5, doa_tracker_outlier=30.0,
+                 aad_model_path=None, aad_window_s=5.0, aad_hop_s=1.0,
+                 aad_envelope="gammatone"):
         """
         Parameters
         ----------
@@ -197,6 +199,28 @@ class Processor:
         self.smooth_doa_left = float("nan")
         self.smooth_doa_right = float("nan")
 
+        # ---- AAD LSTM (optioneel; placeholder als aad_model_path is None) ----
+        # Het Colab-getrainde dilated+LSTM model voorspelt op 5s vensters @ 1s hop
+        # uit (eeg, env_left, env_right) -> P(attended_left).
+        self.aad = None
+        if aad_model_path is not None and os.path.exists(aad_model_path):
+            from algorithms.aad_lstm import AADLSTM
+            self.aad = AADLSTM(
+                model_path=aad_model_path,
+                fs_audio=fs,
+                fs_eeg=128,
+                window_s=aad_window_s,
+                hop_s=aad_hop_s,
+                envelope=aad_envelope,
+            )
+            print(f"[Processor] AAD model geladen ({aad_window_s}s window, {aad_hop_s}s hop, env={aad_envelope})")
+        else:
+            if aad_model_path is not None:
+                print(f"[Processor] WARNING: aad_model_path bestaat niet: {aad_model_path}")
+            print("[Processor] AAD: gebruik placeholder (geen model geladen)")
+        # AAD placeholder-state (alleen gebruikt als self.aad is None)
+        self._aad_window_count = 0
+
         # MUSIC-buffer voor sliding STFT (50% overlap)
         self.music_buf = np.zeros((0, M), dtype=np.float64)
         from scipy import signal as _sig
@@ -316,40 +340,37 @@ class Processor:
         self.data_queue_phase3.put_nowait((speaker, sig_out))
 
     # -------------------------------------------------------------- #
-    #                     EEG-pipeline (placeholder)                 #
+    #                EEG-pipeline (LSTM AAD of placeholder)          #
     # -------------------------------------------------------------- #
     def processing_eeg_gt_audio(self, eeg, sig_left_clean, sig_right_clean):
-        """PLACEHOLDER voor fase 2 LSTM (dilated+lstm uit Colab).
+        """AAD-predictie via dilated+LSTM model (Colab) of placeholder.
 
-        Voor week 1 van fase 3 (audio integration) is een placeholder voldoende -- de
-        EEG/AAD-integratie is grotendeels week 2-werk.
+        Wanneer self.aad is gezet (model geladen), gebruikt het AADLSTM-wrapper
+        met sliding 5s window / 1s hop. Anders valt het terug op een demo-placeholder
+        die elke ~30s switcht tussen sprekers.
 
-        Demo-vriendelijke placeholder:
-        - Alterneert tussen sprekers met een soepel verloop (i.p.v. random per window)
-        - Geeft pred_prob rond 0.85 / 0.15 zodat de frontend een nette curve toont
-        - Switcht elke ~30s (10 windows van 3s) zodat de demo beide sprekers laat zien
-
-        TODO wanneer Pieter het Colab-model uploadt:
-        1) load model: tf.keras.models.load_model(...)
-        2) extract envelopes uit sig_left_clean / sig_right_clean
-           (Gammatone-bank, of Hilbert + lowpass 8Hz)
-        3) run model.predict([eeg, env1, env2]) -> pred_prob (in [0,1])
-        4) self.attended_left = round(pred_prob)
+        Het model verwacht (640, 64) EEG + (640, 1) envelope per zijde @ 128Hz.
+        AADLSTM doet de envelope-extractie (Gammatone bank), buffering en sliding
+        window automatisch. update() retourneert None tot het buffer vol is.
         """
-        # Stable demo placeholder: switch every 10 windows = 30s audio (window = 3s).
-        # Voegt kleine ruis toe rond de "ideale" waarde om realisme te suggereren.
-        if not hasattr(self, "_aad_window_count"):
-            self._aad_window_count = 0
-        self._aad_window_count += 1
-
-        cycle_idx = self._aad_window_count // 10
-        attended_left = (cycle_idx % 2 == 0)
-
-        # pred_prob = "kans dat links de gevolgde spreker is".
-        base = 0.85 if attended_left else 0.15
-        # Kleine random variatie zodat lijn niet kunstmatig vlak is in demo.
-        noise = float(np.random.uniform(-0.05, 0.05))
-        pred_prob = float(np.clip(base + noise, 0.0, 1.0))
-
-        self.attended_left = int(attended_left)
-        self.data_queue_phase2.put_nowait(pred_prob)
+        if self.aad is not None:
+            # Echte LSTM-pipeline
+            pred = self.aad.update(eeg, sig_left_clean, sig_right_clean)
+            if pred is not None:
+                # Nieuwe predictie beschikbaar -> update attended_left
+                self.attended_left = int(pred >= 0.5)
+                pred_prob = float(pred)
+            else:
+                # Buffer nog niet vol -> behoud vorige predictie voor de UI
+                pred_prob = float(self.aad.last_pred)
+            self.data_queue_phase2.put_nowait(pred_prob)
+        else:
+            # Placeholder (demo zonder model): switch elke 10 windows
+            self._aad_window_count += 1
+            cycle_idx = self._aad_window_count // 10
+            attended_left = (cycle_idx % 2 == 0)
+            base = 0.85 if attended_left else 0.15
+            noise = float(np.random.uniform(-0.05, 0.05))
+            pred_prob = float(np.clip(base + noise, 0.0, 1.0))
+            self.attended_left = int(attended_left)
+            self.data_queue_phase2.put_nowait(pred_prob)

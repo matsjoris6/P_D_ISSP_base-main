@@ -28,9 +28,10 @@ import socketio
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 SERVER_DIR = os.path.join(THIS_DIR, "skeleton_ref", "server")
-DEFAULT_MICROARRAY = "/Users/macbookmats/Desktop/P_D_ISSP_base-main/documents_and_given_code/phase_3/phase3_audioData/audiodata_batch_1/anechoic"
-DEFAULT_EEG = "/Users/macbookmats/Desktop/P_D_ISSP_base-main/documents_and_given_code/phase_3/data_phase3"
-DEFAULT_STIMULI = "/Users/macbookmats/Desktop/P_D_ISSP_base-main/documents_and_given_code/phase_3/data_phase3/stimuli"
+ENV_PYTHON = os.path.join(THIS_DIR, "..", "env", "bin", "python")
+DEFAULT_MICROARRAY = "/Users/macbookmats/Desktop/P_D_ISSP_base-main/fase_3/data/phase3_audioData/audiodata_batch_1/anechoic"
+DEFAULT_EEG = "/Users/macbookmats/Desktop/P_D_ISSP_base-main/fase_3/data/data_phase3"
+DEFAULT_STIMULI = "/Users/macbookmats/Desktop/P_D_ISSP_base-main/fase_3/data/data_phase3/stimuli"
 
 
 # Verwachte keys per event-type (zie skeleton_ref/server/server.py Emitter)
@@ -116,8 +117,8 @@ async def main():
     parser.add_argument("--microarray", type=str, default=DEFAULT_MICROARRAY)
     parser.add_argument("--eeg_data", type=str, default=DEFAULT_EEG)
     parser.add_argument("--stimuli", type=str, default=DEFAULT_STIMULI)
-    parser.add_argument("--python", type=str, default="python3.11",
-                        help="Python interpreter (server gebruikt cached_property -> python>=3.8)")
+    parser.add_argument("--python", type=str, default=ENV_PYTHON,
+                        help="Python interpreter voor server en worker subprocesses")
     args = parser.parse_args()
 
     # Validatie van paden voor we iets spawn

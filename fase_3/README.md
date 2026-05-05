@@ -1,20 +1,30 @@
-# Fase 3 – Week 1
+# Fase 3 – Week 1 + 2
 
 Streaming-implementatie van de FD-GSC + dynamische MUSIC + SIR uit
 [deadline1/week4.ipynb](../deadline1/week4.ipynb), aangepast aan de fase 3 audio
-data (16 kHz, 4 minuten, bewegende sprekers).
+data (16 kHz, 4 minuten, bewegende sprekers). **Week 2** voegt toe:
+- Live AAD via dilated+LSTM model (`hybrid_v3_BEST.keras`) met 5s/1s sliding window
+- Bug-fix `get_doa_gt` in skeleton server (cum-sum → diff)
+- Robuuste `run_demo.sh` met venv-autodetect en data-pad-autodetect
 
 ## TL;DR — Demo aan collega's of prof (3 minuten setup)
 
+**Zonder AAD model** (placeholder, alterneert sprekers):
 ```bash
-# Eénmalig: zorg dat de paths in run_demo.sh kloppen voor jouw machine
 cd fase_3
-./run_demo.sh                # default: pair 1, anechoic
-# ./run_demo.sh 5 reverberant  # pair 5, reverberant scenario
+./run_demo.sh                            # default: pair 1, anechoic
+./run_demo.sh 5 reverberant              # pair 5, reverberant
+```
+
+**Met AAD LSTM model** (live EEG-driven spreker-selectie):
+```bash
+cd fase_3
+AAD_MODEL_PATH="$(pwd)/data/hybrid_v3_BEST.keras" ./run_demo.sh
+# Optioneel: AAD_WINDOW_S=5 AAD_HOP_S=1 ./run_demo.sh
 ```
 
 Dit start automatisch:
-1. `server.py` (skeleton) op `http://localhost:8000`
+1. `server.py` op `http://localhost:8000`
 2. `processing.py` (worker met onze algoritmes)
 3. Browser-tab op de live GUI
 
@@ -24,7 +34,7 @@ Wat je in de browser zou moeten zien:
 - **DOA tracking** (links/rechts spreker) -- mediaan fout 0° op de gemeten LUT-hoeken
 - **Twee beamformed waveforms** (gsc_left + gsc_right)
 - **SIR over tijd** -- typisch +6 tot +12 dB
-- **AAD probability** (placeholder, alterneert elke ~30s -- vervangen door LSTM in week 2)
+- **AAD probability** -- met model: live EEG-driven; zonder model: alterneert elke ~30s
 - **Output signal** (geselecteerde spreker volgens AAD)
 
 Volledig **trouw aan de algoritmes** uit fase 1 week 4 — alleen ingepakt in
@@ -45,12 +55,18 @@ fase_3/
 │   ├── lut_builder.py           -- FAS BF + Blocking Matrix per RIR-hoek
 │   ├── streaming_doa.py         -- RIRSteeringMUSIC + DOATracker (v2), StreamingMUSIC (Part 2)
 │   ├── streaming_gsc.py         -- StreamingFDGSC (sliding window, Part 1)
-│   └── streaming_sir.py         -- StreamingSIR (Part 3)
+│   ├── streaming_sir.py         -- StreamingSIR (Part 3)
+│   └── aad_lstm.py              -- [WEEK 2] AADLSTM wrapper + Gammatone envelope
+├── data/
+│   ├── hybrid_v3_BEST.keras     -- [WEEK 2] dilated+LSTM AAD model
+│   ├── phase3_audioData/...     -- microarray + RIRs (anechoic / reverberant)
+│   └── data_phase3/             -- EEG data + stimuli
 ├── processor.py                 -- ingevulde universiteits-skeleton processor
 ├── processing.py                -- ingevulde universiteits-skeleton worker
-├── run_demo.sh                  -- one-command demo launcher
+├── run_demo.sh                  -- one-command demo launcher (week 1+2)
 ├── test_week1.py                -- standalone end-to-end test (geen server nodig)
-├── skeleton_ref/                -- ONGEWIJZIGDE kopie van het universiteits-skeleton
+├── test_gui_roundtrip.py        -- GUI Socket.IO roundtrip validatie
+├── skeleton_ref/                -- universiteits-skeleton (issp_data.py: bug-fix)
 └── output/                      -- gegenereerde WAVs + plots per pair
 ```
 
@@ -193,24 +209,89 @@ De aanpassingen voor streaming + fase-3 data zijn:
 4. μ = 0.001 i.p.v. 0.1 (week4) — fase-3 data met bewegende sprekers heeft kleinere stap nodig
    om target-leakage via blocking matrix te beheersen (zie beta-analyse hierboven)
 
+## Week 2 — AAD LSTM + GUI bug-fix
+
+### AAD LSTM+dilated CNN integratie
+
+Het Colab-getrainde model `fase_3/data/hybrid_v3_BEST.keras` is geïntegreerd in
+de live pipeline:
+
+| Parameter | Waarde | Toelichting |
+|-----------|--------|-------------|
+| Input shape | `(640, 64) + (640, 1) + (640, 1)` | EEG + env links + env rechts @ 128Hz |
+| Window | 5s sliding | overeenkomstig 640 EEG-samples @ 128Hz |
+| Hop | 1s | nieuwe predictie elke 1 seconde |
+| Envelope | Gammatone-bank (default) | 28 banden ERB-spaced 80–6000Hz |
+| Output | 1 sigmoid | P(attended_left) ∈ [0, 1] |
+| Latency | ~30ms per predict | well within 1s budget (real-time) |
+
+**Pipeline** (in `fase_3/algorithms/aad_lstm.py`):
+1. Audio → Gammatone-bank (28 banden) → |Hilbert| per band → ^0.6 compressie → som → 8Hz lowpass → downsample naar 128Hz
+2. EEG (al @ 128Hz, 64 kanalen) → buffer 5s
+3. Sliding window: predict elke 1s, gebruik laatste 5s; gooi oudste 1s weg
+4. Output `pred_prob` → `attended_left = (pred_prob ≥ 0.5)`
+
+**Alternatief envelope** (sneller, ~10× minder rekentijd, vergelijkbare AAD-prestatie):
+```bash
+AAD_MODEL_PATH=… ./run_demo.sh   # default: gammatone
+# of expliciet:
+python processing.py --aad_model_path … --aad_envelope hilbert --aad_window_s 5 --aad_hop_s 1
+```
+
+### GUI bug-fix: `get_doa_gt` cumulatieve-sum bug
+
+In `skeleton_ref/server/issp_data.py` gebruikt de oorspronkelijke `get_doa_gt`
+de cumulatieve `endSamples_l/_r` direct als `np.repeat`-count:
+
+```python
+# OUD (BUGGY):
+doa_0 = np.concatenate([np.repeat(e, n) for e, n in zip(gt["angles_l"], gt["endSamples_l"])])
+```
+
+`endSamples_l` is `[262144, 502239, 742334, ...]` (cumulatief in samples), niet duraties.
+Resultaat: GT wordt 8× te lang gerekt (33M samples i.p.v. 3.86M voor 4-minuten audio),
+GT-tijdslijn loopt voor op werkelijke audio in de live plot → schijnbare DOA-mismatches
+ook al is mediaan fout 0°.
+
+**Fix** (zoals `test_week1.py` regel 66 al correct doet):
+```python
+durations_l = np.diff(np.concatenate([[0], gt["endSamples_l"]]))
+doa_0 = np.concatenate([np.repeat(e, n) for e, n in zip(gt["angles_l"], durations_l)])
+```
+
+### Verbeterde `run_demo.sh`
+
+| Feature | Beschrijving |
+|---------|-------------|
+| Venv autodetect | Probeert `env/` dan `venv/` (geen handmatige `source` nodig) |
+| Data-pad autodetect | Probeert `fase_3/data/` dan `documents_and_given_code/phase_3/` |
+| AAD env-vars | `AAD_MODEL_PATH`, `AAD_WINDOW_S`, `AAD_HOP_S` |
+| Poort 8000 cleanup | Auto-kill bestaand proces als poort bezet |
+| `DATA_BASE` override | `DATA_BASE=/jouw/pad ./run_demo.sh` |
+
 ## Troubleshooting
 
 | Probleem | Oorzaak | Oplossing |
 |----------|---------|-----------|
-| `[FATAL] Data-pad bestaat niet` | `DATA_BASE` in `run_demo.sh` klopt niet | Pas regel 26 aan naar jouw locatie |
+| `[FATAL] Data-pad bestaat niet` | Data-pad detectie faalt | `DATA_BASE=/jouw/pad ./run_demo.sh` of leg data in `fase_3/data/` |
 | `ModuleNotFoundError: algorithms` | Niet vanuit `fase_3/` gestart | `cd fase_3` vóór `python ...` |
-| Server start niet op poort 8000 | Poort al in gebruik | `lsof -i :8000` → kill process |
+| Server start niet op poort 8000 | Poort al in gebruik | `run_demo.sh` doet auto-kill; anders `lsof -ti :8000 \| xargs kill -9` |
 | DOA altijd NaN | `lma_16kHz.npz` niet gevonden | Controleer `data_dir` pad; bestand zit in audiodata-map |
 | SIR negatief | μ te groot → target-leakage | Gebruik `--mu 0.001` (default) |
 | GUI toont geen data | Worker niet verbonden | Check `/tmp/fase3_worker.log` op Socket.IO errors |
 | `RIRSteeringMUSIC` valt terug op planewave | Geen RIRs geladen | Zorg dat `lma_16kHz.npz` beschikbaar is; anders `--sv_model planewave` |
+| `ModuleNotFoundError: tensorflow` | TF niet in actieve venv | TF vereist Python 3.10–3.12; maak venv met `python3.11 -m venv env_tf && source env_tf/bin/activate && pip install tensorflow` |
+| AAD predictions altijd 0.5 | Buffer nog niet vol (eerste 5s) | Normaal; eerste 5 chunks geven `last_pred=0.5` default |
+| GT-DOA loopt voor op werkelijkheid | Oude `issp_data.py` zonder bug-fix | Pull laatste mats branch (commit met `np.diff` fix) |
 
 ## TODO voor volgende weken
 
-- **fase 2 LSTM-integratie**: zodra het dilated+lstm model uit Colab geüpload is,
-  vervang de placeholder in `processor.processing_eeg_gt_audio()` door:
-  - envelope-extractie (Gammatone of Hilbert+LP) op `sig_left_clean`/`sig_right_clean`
-  - `model.predict([eeg, env1, env2])` → `pred_prob`
-- Switching-stabiliteit (smoothing/hysterese tegen sudden AAD-fouten)
-- Reverberant scenario testen
+- ~~**fase 2 LSTM-integratie**~~ ✅ KLAAR (week 2): `aad_lstm.py` met Gammatone + 5s/1s
+  sliding window. `--aad_model_path fase_3/data/hybrid_v3_BEST.keras`.
+- **AAD switching-stabiliteit**: hysterese rond 0.5-grenswaarde tegen flips bij
+  ambigue predictions (~0.45–0.55 range)
+- **AAD accuracy-meting**: vergelijk live `pred_prob` met oracle `attended_speaker`
+  uit gt-data (server stuurt deze al door; toon avg-accuracy in GUI)
+- **Reverberant scenario systeem-evaluatie** met AAD aan
+- **Multi-subject benchmark**: AAD-accuracy per `--subject_no` parameter
 - Volledige systeem-evaluatie + rapport
