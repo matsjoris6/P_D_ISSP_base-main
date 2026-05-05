@@ -37,7 +37,7 @@ sys.path.insert(0, THIS_DIR)
 sys.path.insert(0, os.path.dirname(THIS_DIR))
 
 from algorithms.lut_builder import build_lut_from_rirs
-from algorithms.streaming_doa import StreamingMUSIC, split_left_right
+from algorithms.streaming_doa import StreamingMUSIC, RIRSteeringMUSIC, DOATracker, split_left_right
 from algorithms.streaming_gsc import StreamingFDGSC
 from algorithms.streaming_sir import StreamingSIR, compute_sir_full
 
@@ -104,12 +104,21 @@ def main():
                         help="MUSIC bin range 'k_min,k_max' of 'auto' (= onder aliasing-limiet) of 'full' (1..L/2 zoals week4)")
     parser.add_argument("--combine", type=str, default="geometric", choices=["geometric", "arithmetic"],
                         help="MUSIC pseudospectrum combiner (week4 default = geometric)")
+    parser.add_argument("--sv_model", type=str, default="rir", choices=["rir", "planewave"],
+                        help="MUSIC steering vector model: 'rir' (Fase A, gemeten RIRs) of 'planewave' (oude versie)")
+    parser.add_argument("--snr_weight", action="store_true", default=False,
+                        help="Fase B1: per-bin power-weighted pseudospectrum (alleen sv_model=rir)")
+    parser.add_argument("--use_fb", type=str, default="auto", choices=["auto", "on", "off"],
+                        help="Fase B2: Forward-Backward averaging in R_yy. 'auto' = aan voor reverberant")
+    parser.add_argument("--tracker", action="store_true", default=False,
+                        help="Fase D: DOATracker (mediaan + EMA + outlier-rejectie) toepassen")
     parser.add_argument("--out_dir", type=str, default=os.path.join(THIS_DIR, "output"))
     args = parser.parse_args()
 
     print(f"=== Fase 3 Week 1 standalone test ===")
     print(f"Pair: {args.pair}, scenario: {args.scenario}, duration: {args.duration}s")
     print(f"L={args.L}, update_rate={args.update_rate}, beta={args.beta}, mu={args.mu}")
+    print(f"sv_model={args.sv_model}, snr_weight={args.snr_weight}, use_fb={args.use_fb}")
 
     print("\n[1/5] Loading data...")
     data = load_pair(args.pair, args.scenario)
@@ -153,17 +162,41 @@ def main():
         a, b = args.bin_range.split(",")
         bin_range = (int(a), int(b))
 
-    music = StreamingMUSIC(
-        mic_pos=data["mic_pos"],
-        fs=fs,
-        L=args.L,
-        num_sources=2,
-        beta=args.beta,
-        bin_range=bin_range,
-        combine=args.combine,
-    )
+    # Bepaal use_fb (auto = aan voor reverberant, uit voor anechoic)
+    if args.use_fb == "auto":
+        use_fb = (args.scenario == "reverberant")
+    else:
+        use_fb = (args.use_fb == "on")
+
+    if args.sv_model == "rir":
+        music = RIRSteeringMUSIC(
+            rirs=data["rirs"],
+            thetas=data["rir_thetas"],
+            fs=fs,
+            L=args.L,
+            num_sources=2,
+            beta=args.beta,
+            bin_range=bin_range,
+            combine=args.combine,
+            snr_weight=args.snr_weight,
+            use_fb=use_fb,
+        )
+        print(f"  MUSIC: RIR-derived steering vectors ({len(music.angles)} hoeken), "
+              f"snr_weight={args.snr_weight}, use_fb={use_fb}")
+    else:
+        music = StreamingMUSIC(
+            mic_pos=data["mic_pos"],
+            fs=fs,
+            L=args.L,
+            num_sources=2,
+            beta=args.beta,
+            bin_range=bin_range,
+            combine=args.combine,
+        )
+        print(f"  MUSIC: plane-wave steering vectors (361 hoeken op 0.5° grid)")
     gsc_left = StreamingFDGSC(lut, angles_lut, M, L=args.L, hop=args.L // 2, mu=args.mu, side="left")
     gsc_right = StreamingFDGSC(lut, angles_lut, M, L=args.L, hop=args.L // 2, mu=args.mu, side="right")
+    tracker = DOATracker(window=5, alpha=0.3, outlier_thresh=30.0) if args.tracker else None
     sir_left = StreamingSIR(fs=fs, window_seconds=2.0)
     sir_right = StreamingSIR(fs=fs, window_seconds=2.0)
 
@@ -222,9 +255,16 @@ def main():
                 raw_doa_left = l
             if not np.isnan(r):
                 raw_doa_right = r
-            gsc_left.set_doa(raw_doa_left)
-            gsc_right.set_doa(raw_doa_right)
-        # log altijd dezelfde persistente raw MUSIC schatting
+            if tracker is not None:
+                sm_l, sm_r = tracker.update(raw_doa_left, raw_doa_right)
+                gsc_in_l = sm_l if not np.isnan(sm_l) else raw_doa_left
+                gsc_in_r = sm_r if not np.isnan(sm_r) else raw_doa_right
+            else:
+                gsc_in_l = raw_doa_left
+                gsc_in_r = raw_doa_right
+            gsc_left.set_doa(gsc_in_l)
+            gsc_right.set_doa(gsc_in_r)
+        # log altijd dezelfde persistente raw MUSIC schatting (NIET smoothed -> eerlijke benchmark)
         doa_left_est = raw_doa_left
         doa_right_est = raw_doa_right
 
