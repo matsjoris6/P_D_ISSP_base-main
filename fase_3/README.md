@@ -64,17 +64,33 @@ De browser opent automatisch op `http://localhost:8000`. Stop met **Ctrl-C**.
 
 ---
 
-## Standalone test (geen server nodig)
+## Standalone tests (geen server nodig)
 
+### Week 1 — DOA, GSC, SIR
 ```bash
 cd fase_3
 source ../env/bin/activate
 python test_week1.py --pair 1 --duration 60
 ```
-
 Output in `fase_3/output/pair1_anechoic/`:
 - `gsc_left.wav` + `gsc_right.wav` — beamformed audio
 - `doa_sir.png` — DOA-tracking + SIR over tijd
+
+### Week 2 — get_doa_gt fix, AAD LSTM, Processor
+```bash
+# Zonder AAD model (gebruikt placeholder, geen TensorFlow nodig)
+cd fase_3
+source ../env/bin/activate
+python test_week2.py --pair 1
+
+# Met AAD model (vereist env_tf + TensorFlow)
+source ../env_tf/bin/activate
+python test_week2.py --pair 1 --aad_model_path data/hybrid_v3_BEST.keras
+```
+Wat getest wordt:
+- **Test 1** — `get_doa_gt` bug-fix: verifieert dat de GT-tijdslijn de correcte lengte heeft
+- **Test 2** — AAD LSTM module: envelope-extractie + model-predictions in [0,1]
+- **Test 3** — Volledige Processor: alle drie queues (phase1, phase2, phase3) produceren output
 
 ---
 
