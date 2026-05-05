@@ -1,5 +1,33 @@
 # Fase 3
 
+## Structuur
+
+```
+fase_3/
+├── processor.py              # Centrale processor: koppelt alle algoritmes aan het skeleton
+├── processing.py             # Worker entry point: Socket.IO client, stuurt data door
+├── run_demo.sh               # One-command launcher: start server + worker + browser
+├── test_week1.py             # Standalone test: verwerkt audio zonder server (genereer plots + WAVs)
+├── test_gui_roundtrip.py     # Roundtrip test: valideert server ↔ worker ↔ frontend communicatie
+│
+├── algorithms/
+│   ├── streaming_doa.py      # Wideband MUSIC met exp. R_yy middeling + DOATracker (outlier-rejectie)
+│   ├── streaming_gsc.py      # FD-GSC met sliding STFT, per-bin NLMS-state persistent over chunks
+│   ├── streaming_sir.py      # SIR-berekening via schuifvenster (2s default)
+│   ├── lut_builder.py        # Offline LUT: FAS-beamformer + Blocking Matrix per RIR-hoek
+│   └── aad_lstm.py           # AAD wrapper: Gammatone envelope + 5s/1s sliding window rond Keras model
+│
+├── skeleton/                 # Origineel universiteits-skeleton (ongewijzigd, ter referentie)
+└── skeleton_ref/             # Skeleton met onze bug-fix in issp_data.py (get_doa_gt: cum-sum → diff)
+```
+
+**Pipeline per binnenkomende chunk:**
+1. `processing.py` ontvangt LMA-chunk via Socket.IO → roept `processor.py` aan
+2. `processor.py` → MUSIC update R_yy → DOA schatten → GSC links + rechts → SIR berekenen → output naar queues
+3. Elke 1s: EEG + audio → `aad_lstm.py` → `pred_prob` → geselecteerde spreker
+
+---
+
 ## Vereisten
 
 Zet de data-map in `fase_3/data/` met deze structuur:
