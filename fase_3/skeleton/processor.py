@@ -2,6 +2,15 @@ import asyncio
 import numpy as np
 import scipy.linalg
 from scipy import signal
+import logging
+logging.getLogger('brian2').setLevel(logging.ERROR)
+import brian2
+brian2.prefs.codegen.target = 'numpy'
+from brian2 import Hz, kHz
+from brian2hears import Sound, erbspace, Gammatone, Filterbank
+from math import gcd
+import tensorflow as tf
+import time
 
 def compute_sir(y, x1, x2, groundTruth):
     """
@@ -60,6 +69,46 @@ def build_lut_for_target(target_rir, L=1024):
         if Z.shape[1] > 0:
             B_matrix[k, :, :] = Z.conj().T
     return W_FAS, B_matrix
+
+class EnvelopeFromGammatoneFilterbank(Filterbank):
+    """Converts the output of a GammatoneFilterbank to an envelope."""
+    def __init__(self, source):
+        super().__init__(source)
+        self.nchannels = 1
+
+    def buffer_apply(self, input_):
+        abs_input = np.abs(input_)
+        compressed = abs_input ** 0.6
+        envelope = np.sum(compressed, axis=1, keepdims=True)
+        return envelope
+
+
+def compute_audio_envelope(audio_data, sr_in, sr_out=64, lowcut=1.0, highcut=32.0):
+    """Functioneel identiek aan process_audio_file uit phase 2."""
+    sound = Sound(audio_data.reshape(-1, 1), samplerate=sr_in * Hz)
+    cf = erbspace(50 * Hz, 5 * kHz, 28)
+    gammatone_filterbank = Gammatone(sound, cf)
+    envelope_calc = EnvelopeFromGammatoneFilterbank(gammatone_filterbank)
+    envelope = envelope_calc.process().flatten()
+
+    sos = signal.butter(N=4, Wn=[lowcut, highcut], btype='bandpass', fs=sr_in, output='sos')
+    envelope_filtered = signal.sosfiltfilt(sos, envelope)
+
+    g = gcd(int(sr_in), sr_out)
+    envelope_downsampled = signal.resample_poly(envelope_filtered, sr_out // g, int(sr_in) // g)
+    return envelope_downsampled
+
+
+def preprocess_eeg(eeg_data, fs_in, fs_out=64, lowcut=1.0, highcut=32.0):
+    """Functioneel identiek aan process_eeg_file uit phase 2."""
+    sos = signal.butter(N=4, Wn=[lowcut, highcut], btype='bandpass', fs=fs_in, output='sos')
+    eeg_filtered = signal.sosfiltfilt(sos, eeg_data, axis=0)
+
+    g = gcd(int(fs_in), fs_out)
+    eeg_downsampled = signal.resample_poly(eeg_filtered, fs_out // g, int(fs_in) // g, axis=0)
+    return eeg_downsampled
+
+
 class Processor:
     def __init__(self, fs=16000, rir_path=_RIR_PATH):
         self.attended_left = 1
@@ -73,7 +122,7 @@ class Processor:
         self.fs = fs
         self.M = 5  # Aantal LMA microfoons
         self.L = 1024  # FFT Window size
-        self.beta = 0.95  
+        self.beta = 0.85  
         self.c = 343.0
         self.Q = 2  # Aantal sprekers
         self.mu = 0.01  # NLMS stapgrootte
@@ -85,26 +134,7 @@ class Processor:
         self.num_bins = self.L // 2 + 1
         self.Ryy = np.zeros((self.num_bins, self.M, self.M), dtype=complex)
 
-        # Pre-compute MUSIC variabelen
-        self.angles = np.arange(0, 180.5, 0.5)
-        self.rads = np.radians(self.angles)
         
-        mic_pos = _LMA_COORDS
-            
-        mics_centered = mic_pos - np.mean(mic_pos, axis=0)
-        self.px = mics_centered[:, 0].reshape(-1, 1)
-        self.py = mics_centered[:, 1].reshape(-1, 1)
-
-        rir_data = np.load(rir_path)
-        rirs = rir_data["rirs"]   # (nSamples, nMics, nRIRs) shape: (22050, 5, 20)
-        doas = rir_data["thetas"]   # (nRIRs,) shape: (20,) — 20 vooraf berekende hoeken
-        print(f"Beschikbare hoeken: {doas}")
-        self.lut_angles = np.array(doas)
-        self.lut = {}
-        for i, angle in enumerate(doas):
-            rir = rirs[:, :, i]
-            W_FAS, B = build_lut_for_target(rir, L=self.L)
-            self.lut[float(angle)] = (W_FAS, B)
 
         # NLMS gewichten per richting (links en rechts), per frequentiebin
         self.w_nlms_left = np.zeros((self.num_bins, self.M - 1), dtype=complex)
@@ -135,11 +165,68 @@ class Processor:
         # Window voor STFT (sqrt-Hann voor perfecte reconstructie)
         self.window = np.sqrt(signal.windows.hann(self.L, sym=False))
 
-        # VAD state voor streaming adaptatie
-        self.energy_history = []
-        self.energy_history_size = 50    
-        self.vad_threshold_factor = 5   # adapteer als energie < factor × min_energy
-    
+   
+
+        # === Streaming framing parameters ===
+        self.hop = self.L // 2   # 512 samples = 50% overlap
+
+        # Input accumulators (wachten tot we hop samples hebben)
+        self.input_accumulator = np.zeros((0, self.M))
+        self.input_accumulator_gt0 = np.zeros((0, self.M))
+        self.input_accumulator_gt1 = np.zeros((0, self.M))
+
+        # Output overlap-add buffers (één per beam)
+        self.ola_buffer_left = np.zeros(self.L)
+        self.ola_buffer_right = np.zeros(self.L)
+        self.ola_buffer_L_gt0 = np.zeros(self.L)
+        self.ola_buffer_L_gt1 = np.zeros(self.L)
+        self.ola_buffer_R_gt0 = np.zeros(self.L)
+        self.ola_buffer_R_gt1 = np.zeros(self.L)
+
+        
+        # Fallback hoeken voor de "koude start" (als er nog niet gesproken is)
+        self.last_angle_left = 135.0  
+        self.last_angle_right = 45.0
+
+        # AAD model laden (Phase 2 Dilated CNN, 5s window) 
+        model_path = "models/generic_dilated_alle_proefpersonen_beste_pieter_3laag_5sec_VERVOLG.keras"
+        self.aad_model = tf.keras.models.load_model(model_path)
+        self.aad_window_samples = 320   # 5s × 64Hz
+        self.eeg_fs_in = 128            # raw EEG sample rate
+        self.audio_fs_in = 16000        # raw audio sample rate (volgens README)
+
+        # PRE-COMPUTING: RIR Steering Vectors & GSC Filters
+        rir_data = np.load(rir_path)
+        rirs = rir_data["rirs"]   
+        doas = rir_data["thetas"] 
+        
+        self.lut_angles = np.array(doas)
+        self.A_lut = np.zeros((self.num_bins, self.M, len(doas)), dtype=complex)
+        self.lut = {}
+        
+        for i, angle in enumerate(doas):
+            rir = rirs[:, :, i]
+            
+            #  MUSIC: Bouw de gemeten steering vector H_omega voor deze hoek
+            H_omega = np.fft.rfft(rir, n=self.L, axis=0)
+            for k in range(self.num_bins):
+                h_k = H_omega[k, :].reshape(self.M, 1)
+                A_1 = h_k[0, 0] # Normaliseer op mic 1
+                if np.abs(A_1) > 1e-12:
+                    h_k = h_k / A_1
+                else:
+                    h_k = h_k / (A_1 + 1e-12)
+                self.A_lut[k, :, i] = h_k.flatten()
+
+            # GSC: Bouw de FAS en Blocking matrix
+            W_FAS, B = build_lut_for_target(rir, L=self.L)
+            self.lut[float(angle)] = (W_FAS, B)
+
+            # VAD statistieken (per beam) ENKEL VOOR TEST
+            self.vad_evals = 0
+            self.vad_update_count_left = 0
+            self.vad_update_count_right = 0
+            #EINDE TEST
     def _get_lut_for_angle(self, doa):
         """Pakt dichtstbijzijnde hoek uit de LUT."""
         closest_angle = self.lut_angles[np.argmin(np.abs(self.lut_angles - doa))]
@@ -147,240 +234,262 @@ class Processor:
     
     def _apply_gsc_frame(self, frame_fft, W_FAS, B, w_nlms, update_filter):
         """
-        Past FD-GSC toe op één FFT frame (vector over alle M mics per bin).
-        
-        frame_fft : (num_bins, M) complex - FFT van huidig frame
-        W_FAS : (num_bins, M) - FAS weights
-        B : (num_bins, M-1, M) - blocking matrix
-        w_nlms : (num_bins, M-1) - NLMS weights (wordt in-place geüpdatet)
-        update_filter : bool - of NLMS moet leren (alleen bij geen-speech)
-        out_fft : (num_bins,) - gefilterde output in freq domein
+        Gevectoriseerde FD-GSC voor maximale real-time snelheid.
         """
-        out_fft = np.zeros(self.num_bins, dtype=complex)
-        eps = 1e-8
+        # 1. FAS output: dot product over de microfoon as (vdot equivalent)
+        y_fas = np.sum(np.conj(W_FAS) * frame_fft, axis=1)
+        
+        # 2. Blocking matrix output: B @ X per frequentiebin
+        u = np.einsum('nij,nj->ni', B, frame_fft)
+        
+        # 3. Adaptive filter vermenigvuldiging
+        y_bm = np.sum(np.conj(w_nlms) * u, axis=1)
+        
+        # 4. Error signal (jouw uiteindelijke gefilterde audio)
+        e = y_fas - y_bm
+        
+        # 5. Filter update (vectorized)
+        if update_filter:
+            power = np.real(np.sum(np.conj(u) * u, axis=1))
+            w_nlms += self.mu * u * np.conj(e)[:, np.newaxis] / (power[:, np.newaxis] + 1e-8)
 
-        for k in range(self.num_bins):
-            x = frame_fft[k, :]  # (M,)
-            y_fas = np.vdot(W_FAS[k, :], x)
-            u = B[k, :, :] @ x   # (M-1,)
-            e = y_fas - np.vdot(w_nlms[k, :], u)
-            out_fft[k] = e
-
-            if update_filter:
-                power = np.vdot(u, u).real
-                w_nlms[k, :] += self.mu * u * np.conj(e) / (power + eps)
-
-        return out_fft
+        return e
 
     def processing_microarray(self, lma, lma_gt0=None, lma_gt1=None):
-        chunk_size = lma.shape[0]
-
-        #Update de sliding window met de nieuwe chunk
-        self.audio_buffer = np.roll(self.audio_buffer, -chunk_size, axis=0)
-        self.audio_buffer[-chunk_size:, :] = lma
-
-        # Update sliding windows voor gt signalen (voor SIR)
+        # Accumuleer incoming server-chunks
+        self.input_accumulator = np.vstack([self.input_accumulator, lma])
         if lma_gt0 is not None and lma_gt1 is not None:
-            self.audio_buffer_gt0 = np.roll(self.audio_buffer_gt0, -chunk_size, axis=0)
-            self.audio_buffer_gt0[-chunk_size:, :] = lma_gt0
-            self.audio_buffer_gt1 = np.roll(self.audio_buffer_gt1, -chunk_size, axis=0)
-            self.audio_buffer_gt1[-chunk_size:, :] = lma_gt1
+            self.input_accumulator_gt0 = np.vstack([self.input_accumulator_gt0, lma_gt0])
+            self.input_accumulator_gt1 = np.vstack([self.input_accumulator_gt1, lma_gt1])
 
-        # Toepassen van een window functie (Hann) voor rfft
-        windowed_frame = self.audio_buffer * self.window[:, np.newaxis]
+        # Verwerk zoveel hops als beschikbaar
+        while self.input_accumulator.shape[0] >= self.hop:
+            # Pak één hop uit de accumulator
+            hop_samples = self.input_accumulator[:self.hop, :]
+            self.input_accumulator = self.input_accumulator[self.hop:, :]
 
-        # Fast Fourier Transform op het huidige frame
-        frame_fft = np.fft.rfft(windowed_frame, n=self.L, axis=0)
-        freqs = np.fft.rfftfreq(self.L, d=1/self.fs)
+            # Schuif sliding window
+            self.audio_buffer = np.roll(self.audio_buffer, -self.hop, axis=0)
+            self.audio_buffer[-self.hop:, :] = hop_samples
 
-        pseudospectra = []
-        valid_indices = range(1, self.L // 2)
+            # Idem voor gt buffers
+            has_gt = (self.input_accumulator_gt0.shape[0] >= self.hop and
+                    self.input_accumulator_gt1.shape[0] >= self.hop)
+            if has_gt:
+                hop_gt0 = self.input_accumulator_gt0[:self.hop, :]
+                hop_gt1 = self.input_accumulator_gt1[:self.hop, :]
+                self.input_accumulator_gt0 = self.input_accumulator_gt0[self.hop:, :]
+                self.input_accumulator_gt1 = self.input_accumulator_gt1[self.hop:, :]
+                self.audio_buffer_gt0 = np.roll(self.audio_buffer_gt0, -self.hop, axis=0)
+                self.audio_buffer_gt0[-self.hop:, :] = hop_gt0
+                self.audio_buffer_gt1 = np.roll(self.audio_buffer_gt1, -self.hop, axis=0)
+                self.audio_buffer_gt1[-self.hop:, :] = hop_gt1
 
-        #Exponentiële middeling en DOA schatting per frequentiebin
-        for k in valid_indices:
-            # Vector van observaties voor frequentie k
-            Y = frame_fft[k, :].reshape(self.M, 1)
-            R_k = Y @ Y.conj().T
+            # VAD per spreker op clean speech (oracle VAD, zoals phase 1)
+            if has_gt:
+                speech_left_chan = self.audio_buffer_gt0[-self.hop:, 0]
+                speech_right_chan = self.audio_buffer_gt1[-self.hop:, 0]
+                vad_left = np.any(np.abs(speech_left_chan) > np.std(speech_left_chan) * 0.1)
+                vad_right = np.any(np.abs(speech_right_chan) > np.std(speech_right_chan) * 0.1)
+            else:
+                vad_left = False
+                vad_right = False
 
-            # Exponentiële update van Ryy
-            self.Ryy[k] = self.beta * self.Ryy[k] + (1 - self.beta) * R_k
-
-            # Ruissubruimte bepalen
-            _, eigvecs = np.linalg.eigh(self.Ryy[k])
-            En = eigvecs[:, :self.M - self.Q]
-
-            # Steering vector bepalen
-            omega = 2 * np.pi * freqs[k]
-            taus = (self.px * np.sin(self.rads) + self.py * np.cos(self.rads)) / self.c
-            A = np.exp(-1j * omega * taus)
-
-            # Pseudospectrum 
-            denom = np.sum(np.abs(En.conj().T @ A)**2, axis=0)
-            p_theta = 1.0 / denom
-            pseudospectra.append(p_theta)
-
-        #  Geometrisch Gemiddelde en Peak Finding
-        pseudospectra = np.array(pseudospectra)
-        pseudospectra = np.clip(pseudospectra, 1e-10, None)  # voorkomt log(0) = -inf
-        log_p = np.log(pseudospectra)
-        p_geom = np.exp(np.mean(log_p, axis=0))
-        spectrum_geom_db = 10 * np.log10(p_geom / np.max(p_geom))
-
-        peaks_indices, _ = signal.find_peaks(spectrum_geom_db)
+            # NLMS update tijdens stilte van eigen target (target leakage vermijden)
+            update_filter_left = not vad_left
+            update_filter_right = not vad_right
         
-        # Selecteer de twee hoogste pieken
-       
-        if len(peaks_indices) >= self.Q:
-            sorted_peak_indices = peaks_indices[np.argsort(spectrum_geom_db[peaks_indices])][-self.Q:]
-            estimated_doas = np.sort(self.angles[sorted_peak_indices])
-        else:
-            return  # Niets sturen, wacht op volgende frame
-        
-
-        # angle_left altijd in [180 -> 90]  en angle_right in [90 -> 0]
-        angle_right = estimated_doas[0] if estimated_doas[0] <= 90 else estimated_doas[1]
-        angle_left = estimated_doas[1] if estimated_doas[1] > 90 else estimated_doas[0]
-
-        # DEBUG: print toewijzing
-        if not hasattr(self, "_debug_printed"):
-            print(f"angle_left={angle_left} (verwacht >90), angle_right={angle_right} (verwacht <90)")
-            self._debug_printed = True
-
-
-        #Streaming VAD
-        frame_energy = np.mean(self.audio_buffer[-chunk_size:, 0] ** 2)
-        self.energy_history.append(frame_energy)
-        if len(self.energy_history) > self.energy_history_size:
-            self.energy_history.pop(0)
-
-        if len(self.energy_history) >= 10:
-            min_energy = np.min(self.energy_history)
-            update_filter = frame_energy < min_energy * self.vad_threshold_factor
-        else:
-            update_filter = False  # Niet adapteren voor de buffer betrouwbaar is
-
-        #FD-GSC: twee beamformers
-        W_FAS_L, B_L = self._get_lut_for_angle(angle_left)
-        W_FAS_R, B_R = self._get_lut_for_angle(angle_right)
-
-        # Target links: steer naar links, cancel rechts
-        out_fft_left = self._apply_gsc_frame(
-            frame_fft, W_FAS_L, B_L, self.w_nlms_left, update_filter
-        )
-        # Target rechts: steer naar rechts, cancel links
-        out_fft_right = self._apply_gsc_frame(
-            frame_fft, W_FAS_R, B_R, self.w_nlms_right, update_filter
-        )
-
-        # Inverse FFT + window om tijd-domein output te krijgen
-        out_time_left = np.fft.irfft(out_fft_left, n=self.L) * self.window
-        out_time_right = np.fft.irfft(out_fft_right, n=self.L) * self.window
-
-        # Pak alleen de laatste chunk_size samples (nieuwste data)
-        sig0 = out_time_left[-chunk_size:].astype(np.float32)   # linker spreker versterkt
-        sig1 = out_time_right[-chunk_size:].astype(np.float32)  # rechter spreker versterkt
-
-        # ===== SIR berekening: per 1-seconde venster =====
-        sir = self._last_sir  # standaard: hou laatste waarde vast tussen vensters
-
-        if lma_gt0 is not None and lma_gt1 is not None:
-            # Pas beamformers toe op gt0 en gt1 (geen NLMS update)
-            windowed_gt0 = self.audio_buffer_gt0 * self.window[:, np.newaxis]
-            windowed_gt1 = self.audio_buffer_gt1 * self.window[:, np.newaxis]
-            fft_gt0 = np.fft.rfft(windowed_gt0, n=self.L, axis=0)
-            fft_gt1 = np.fft.rfft(windowed_gt1, n=self.L, axis=0)
-
-            w_left_eval = self.w_nlms_left.copy()
-            out_fft_L_gt0 = self._apply_gsc_frame(fft_gt0, W_FAS_L, B_L, w_left_eval, False)
-            out_fft_L_gt1 = self._apply_gsc_frame(fft_gt1, W_FAS_L, B_L, w_left_eval, False)
-            out_L_gt0 = (np.fft.irfft(out_fft_L_gt0, n=self.L) * self.window)[-chunk_size:]
-            out_L_gt1 = (np.fft.irfft(out_fft_L_gt1, n=self.L) * self.window)[-chunk_size:]
-
-            w_right_eval = self.w_nlms_right.copy()
-            out_fft_R_gt0 = self._apply_gsc_frame(fft_gt0, W_FAS_R, B_R, w_right_eval, False)
-            out_fft_R_gt1 = self._apply_gsc_frame(fft_gt1, W_FAS_R, B_R, w_right_eval, False)
-            out_R_gt0 = (np.fft.irfft(out_fft_R_gt0, n=self.L) * self.window)[-chunk_size:]
-            out_R_gt1 = (np.fft.irfft(out_fft_R_gt1, n=self.L) * self.window)[-chunk_size:]
-
-            # Verzamel in 1-seconde buffers
-            self.sir_buf_y_left.append(sig0)
-            self.sir_buf_y_right.append(sig1)
-            self.sir_buf_L_gt0.append(out_L_gt0)
-            self.sir_buf_L_gt1.append(out_L_gt1)
-            self.sir_buf_R_gt0.append(out_R_gt0)
-            self.sir_buf_R_gt1.append(out_R_gt1)
-            self.sir_buf_count += chunk_size
-
-            # Zodra we 1 seconde hebben verzameld: bereken SIR en reset
-            if self.sir_buf_count >= self.sir_window_samples:
-                y_left_full = np.concatenate(self.sir_buf_y_left)
-                y_right_full = np.concatenate(self.sir_buf_y_right)
-                L_gt0_full = np.concatenate(self.sir_buf_L_gt0)
-                L_gt1_full = np.concatenate(self.sir_buf_L_gt1)
-                R_gt0_full = np.concatenate(self.sir_buf_R_gt0)
-                R_gt1_full = np.concatenate(self.sir_buf_R_gt1)
-
-                gt_vec = np.ones(len(L_gt0_full))
-
-                sir_left = compute_sir(y_left_full, L_gt0_full, L_gt1_full, gt_vec)     # LATER WEGHALEN
-                sir_right = compute_sir(y_right_full, R_gt1_full, R_gt0_full, gt_vec)   # LATER WEGHALEN
-
-                if self.attended_left:
-                    sir = sir_left
-                else:
-                    sir = sir_right
-
-                if np.isnan(sir):
-                    sir = 0.0
-
-                self._last_sir = sir
-                self._last_sir_left = sir_left if not np.isnan(sir_left) else 0.0    # LATER WEGHALEN
-                self._last_sir_right = sir_right if not np.isnan(sir_right) else 0.0 # LATER WEGHALEN
-
-                # Reset buffers
-                self.sir_buf_y_left = []
-                self.sir_buf_y_right = []
-                self.sir_buf_L_gt0 = []
-                self.sir_buf_L_gt1 = []
-                self.sir_buf_R_gt0 = []
-                self.sir_buf_R_gt1 = []
-                self.sir_buf_count = 0
-
-                # LATER WEGHALEN: debug print elke seconde
-                print(f"  [SIR-1s] left={self._last_sir_left:.2f} dB, right={self._last_sir_right:.2f} dB, attended={'L' if self.attended_left else 'R'} -> {sir:.2f} dB")
-
-        # # LATER WEGHALEN: debug print elke 50 frames
-        # if not hasattr(self, "_sir_print_counter"):
-        #     self._sir_print_counter = 0
-        # self._sir_print_counter += 1
-        # if self._sir_print_counter % 50 == 0:
-        #     print(f"[SIR] left={sir_left:.2f} dB, right={sir_right:.2f} dB, attended={'L' if self.attended_left else 'R'} -> {sir:.2f} dB")
-
-        # if lma_gt0 is not None and lma_gt1 is not None and self._sir_print_counter % 50 == 1:
-        #     rms_sig0 = np.sqrt(np.mean(sig0**2))
-        #     rms_L_gt0 = np.sqrt(np.mean(out_L_gt0**2))
-        #     rms_L_gt1 = np.sqrt(np.mean(out_L_gt1**2))
-        #     rms_R_gt0 = np.sqrt(np.mean(out_R_gt0**2))
-        #     rms_R_gt1 = np.sqrt(np.mean(out_R_gt1**2))
-        #     print(f"  RMS check: sig0={rms_sig0:.1f}, L_gt0={rms_L_gt0:.1f}, L_gt1={rms_L_gt1:.1f}, R_gt0={rms_R_gt0:.1f}, R_gt1={rms_R_gt1:.1f}")
+            # Statistieken bijhouden BEGIN TEST
+            self.vad_evals += 1
+            if update_filter_left:
+                self.vad_update_count_left += 1
+            if update_filter_right:
+                self.vad_update_count_right += 1    
+            #EINDE TEST
             
-        #     # Check sanity: y vs x1+x2
-        #     res_L = sig0 - (out_L_gt0 + out_L_gt1)
-        #     print(f"  Residual L: ||y-x1-x2|| / ||y|| = {np.sqrt(np.sum(res_L**2)) / (np.sqrt(np.sum(sig0**2)) + 1e-12):.4f}")
+            #  Analysis: window + FFT
+            windowed = self.audio_buffer * self.window[:, np.newaxis]
+            frame_fft = np.fft.rfft(windowed, n=self.L, axis=0)
+            freqs = np.fft.rfftfreq(self.L, d=1/self.fs)
+
+            #  MUSIC DOA 
+            valid_k = np.arange(1, self.L // 2)
+
+            Y = frame_fft[valid_k, :, np.newaxis] 
+            R_k_all = Y @ Y.conj().transpose(0, 2, 1) 
+            
+            self.Ryy[valid_k] = self.beta * self.Ryy[valid_k] + (1 - self.beta) * R_k_all
+
+            _, eigvecs = np.linalg.eigh(self.Ryy[valid_k])
+            En = eigvecs[:, :, :self.M - self.Q] 
+
+            # Vermenigvuldig met self.A_lut 
+            En_H_A = En.conj().transpose(0, 2, 1) @ self.A_lut[valid_k] 
+            denom = np.sum(np.abs(En_H_A) ** 2, axis=1) 
+            pseudospectra = 1.0 / denom 
+
+            pseudospectra = np.clip(pseudospectra, 1e-10, None)
+            log_p = np.log(pseudospectra)
+            p_geom = np.exp(np.mean(log_p, axis=0)) # Resulteert in exact 20 datapunten
+            spectrum_geom_db = 10 * np.log10(p_geom / np.max(p_geom))
+            
+            # Direct Mappen op de 20 hoeken (Geen find_peaks meer nodig)
+            PEAK_THRESHOLD = -12.0
+            
+            # Deel de 20 hoeken op in links en rechts
+            left_mask = self.lut_angles > 90
+            right_mask = self.lut_angles <= 90
+            
+            # np.where negeert de foute kant (-inf), argmax pakt simpelweg het hoogste punt
+            best_left_idx = np.argmax(np.where(left_mask, spectrum_geom_db, -np.inf))
+            best_right_idx = np.argmax(np.where(right_mask, spectrum_geom_db, -np.inf))
                 
-        self.data_queue_phase1.put_nowait((sig0, sig1, angle_left, angle_right, sir))
+            # Check of de gevonden piek hard genoeg is (boven threshold)
+            if spectrum_geom_db[best_left_idx] > PEAK_THRESHOLD:
+                self.last_angle_left = self.lut_angles[best_left_idx]
+            if spectrum_geom_db[best_right_idx] > PEAK_THRESHOLD:
+                self.last_angle_right = self.lut_angles[best_right_idx]
 
-        # Final output selectie
-        sig_out = sig0 if self.attended_left else sig1
-        speaker = round(np.random.random())
-        self.data_queue_phase3.put_nowait((speaker, sig_out))
+            angle_left = self.last_angle_left
+            angle_right = self.last_angle_right
 
+            # FD-GSC
+            W_FAS_L, B_L = self._get_lut_for_angle(angle_left)
+            W_FAS_R, B_R = self._get_lut_for_angle(angle_right)
+
+            out_fft_left = self._apply_gsc_frame(frame_fft, W_FAS_L, B_L, self.w_nlms_left, update_filter_left)
+            out_fft_right = self._apply_gsc_frame(frame_fft, W_FAS_R, B_R, self.w_nlms_right, update_filter_right)
+
+            # Synthesis: IFFT + window + overlap-add
+            out_time_left = np.fft.irfft(out_fft_left, n=self.L) * self.window
+            out_time_right = np.fft.irfft(out_fft_right, n=self.L) * self.window
+
+            self.ola_buffer_left += out_time_left
+            self.ola_buffer_right += out_time_right
+
+            sig0_hop = self.ola_buffer_left[:self.hop].copy()
+            sig1_hop = self.ola_buffer_right[:self.hop].copy()
+
+            self.ola_buffer_left = np.concatenate([self.ola_buffer_left[self.hop:], np.zeros(self.hop)])
+            self.ola_buffer_right = np.concatenate([self.ola_buffer_right[self.hop:], np.zeros(self.hop)])
+
+            # SIR berekening
+            sir = self._last_sir
+            if has_gt:
+                windowed_gt0 = self.audio_buffer_gt0 * self.window[:, np.newaxis]
+                windowed_gt1 = self.audio_buffer_gt1 * self.window[:, np.newaxis]
+                fft_gt0 = np.fft.rfft(windowed_gt0, n=self.L, axis=0)
+                fft_gt1 = np.fft.rfft(windowed_gt1, n=self.L, axis=0)
+
+                w_left_eval = self.w_nlms_left.copy()
+                out_fft_L_gt0 = self._apply_gsc_frame(fft_gt0, W_FAS_L, B_L, w_left_eval, False)
+                out_fft_L_gt1 = self._apply_gsc_frame(fft_gt1, W_FAS_L, B_L, w_left_eval, False)
+                # Overlap-add voor SIR-signalen (zelfde principe als de hoofd-output)
+                out_L_gt0_full = np.fft.irfft(out_fft_L_gt0, n=self.L) * self.window
+                out_L_gt1_full = np.fft.irfft(out_fft_L_gt1, n=self.L) * self.window
+                self.ola_buffer_L_gt0 += out_L_gt0_full
+                self.ola_buffer_L_gt1 += out_L_gt1_full
+                out_L_gt0_hop = self.ola_buffer_L_gt0[:self.hop].copy()
+                out_L_gt1_hop = self.ola_buffer_L_gt1[:self.hop].copy()
+                self.ola_buffer_L_gt0 = np.concatenate([self.ola_buffer_L_gt0[self.hop:], np.zeros(self.hop)])
+                self.ola_buffer_L_gt1 = np.concatenate([self.ola_buffer_L_gt1[self.hop:], np.zeros(self.hop)])
+
+                w_right_eval = self.w_nlms_right.copy()
+                out_fft_R_gt0 = self._apply_gsc_frame(fft_gt0, W_FAS_R, B_R, w_right_eval, False)
+                out_fft_R_gt1 = self._apply_gsc_frame(fft_gt1, W_FAS_R, B_R, w_right_eval, False)
+                out_R_gt0_full = np.fft.irfft(out_fft_R_gt0, n=self.L) * self.window
+                out_R_gt1_full = np.fft.irfft(out_fft_R_gt1, n=self.L) * self.window
+                self.ola_buffer_R_gt0 += out_R_gt0_full
+                self.ola_buffer_R_gt1 += out_R_gt1_full
+                out_R_gt0_hop = self.ola_buffer_R_gt0[:self.hop].copy()
+                out_R_gt1_hop = self.ola_buffer_R_gt1[:self.hop].copy()
+                self.ola_buffer_R_gt0 = np.concatenate([self.ola_buffer_R_gt0[self.hop:], np.zeros(self.hop)])
+                self.ola_buffer_R_gt1 = np.concatenate([self.ola_buffer_R_gt1[self.hop:], np.zeros(self.hop)])
+                
+                self.sir_buf_y_left.append(sig0_hop)
+                self.sir_buf_y_right.append(sig1_hop)
+                self.sir_buf_L_gt0.append(out_L_gt0_hop)
+                self.sir_buf_L_gt1.append(out_L_gt1_hop)
+                self.sir_buf_R_gt0.append(out_R_gt0_hop)
+                self.sir_buf_R_gt1.append(out_R_gt1_hop)
+                self.sir_buf_count += self.hop
+
+                if self.sir_buf_count >= self.sir_window_samples and len(self.sir_buf_y_left) > 0:
+                    y_left_full = np.concatenate(self.sir_buf_y_left)
+                    y_right_full = np.concatenate(self.sir_buf_y_right)
+                    L_gt0_full = np.concatenate(self.sir_buf_L_gt0)
+                    L_gt1_full = np.concatenate(self.sir_buf_L_gt1)
+                    R_gt0_full = np.concatenate(self.sir_buf_R_gt0)
+                    R_gt1_full = np.concatenate(self.sir_buf_R_gt1)
+                    gt_vec = np.ones(len(L_gt0_full))
+
+                    sir_left = compute_sir(y_left_full, L_gt0_full, L_gt1_full, gt_vec)
+                    sir_right = compute_sir(y_right_full, R_gt1_full, R_gt0_full, gt_vec)
+                    sir = sir_left if self.attended_left else sir_right
+                    if np.isnan(sir):
+                        sir = 0.0
+                    self._last_sir = sir
+                    self._last_sir_left = sir_left if not np.isnan(sir_left) else 0.0
+                    self._last_sir_right = sir_right if not np.isnan(sir_right) else 0.0
+
+                    self.sir_buf_y_left = []
+                    self.sir_buf_y_right = []
+                    self.sir_buf_L_gt0 = []
+                    self.sir_buf_L_gt1 = []
+                    self.sir_buf_R_gt0 = []
+                    self.sir_buf_R_gt1 = []
+                    self.sir_buf_count = 0
+
+                    print(f"  [SIR-1s] left={self._last_sir_left:.2f} dB, right={self._last_sir_right:.2f} dB, attended={'L' if self.attended_left else 'R'} -> {sir:.2f} dB")
+
+            # Push output naar de queues (per hop)
+            self.data_queue_phase1.put_nowait(
+                (sig0_hop.astype(np.float32), sig1_hop.astype(np.float32),
+                angle_left, angle_right, sir)
+            )
+            sig_out = sig0_hop if self.attended_left else sig1_hop
+            speaker = 0 if self.attended_left else 1
+            self.data_queue_phase3.put_nowait((speaker, sig_out.astype(np.float32)))
 
     def processing_eeg_gt_audio(self, eeg, sig_left_clean, sig_right_clean):
-        # Preprocessing, Prediction, etc...
-        # Using your own gsc out vs oracle?
+        """
+        eeg : (N_eeg, 64) at 128 Hz, ~5 seconden
+        sig_left_clean, sig_right_clean : (N_audio,) at 16000 Hz, ~5 seconden
+        """
+        t0 = time.time()
+        # Preprocessing 
+        eeg_proc = preprocess_eeg(eeg, fs_in=self.eeg_fs_in, fs_out=64)
+        t1=time.time()
+        env_left = compute_audio_envelope(sig_left_clean.astype(np.float32),
+                                        sr_in=self.audio_fs_in, sr_out=64)
+        t2=time.time()
+        env_right = compute_audio_envelope(sig_right_clean.astype(np.float32),
+                                        sr_in=self.audio_fs_in, sr_out=64)
+        t3=time.time()
 
-        pred_prob = np.random.random() * 0.8 + 0.1
+        # Truncate naar exact aad_window_samples
+        n = self.aad_window_samples
+        eeg_proc = eeg_proc[:n]
+        env_left = env_left[:n]
+        env_right = env_right[:n]
+
+        # Naar model formaat
+        eeg_in = eeg_proc[np.newaxis, :, :].astype(np.float32)         # (1, 320, 64)
+        env1_in = env_left[np.newaxis, :, np.newaxis].astype(np.float32)
+        env2_in = env_right[np.newaxis, :, np.newaxis].astype(np.float32)
+
+        # Predictie
+        pred = self.aad_model([eeg_in, env1_in, env2_in], training=False) #gebruik model zelf als functie
+        pred_prob = float(pred[0, 0])
+        t4=time.time()
+        print(f"\n--- AAD Timing Breakdown ---")
+        print(f"EEG Preprocessing:   {(t1 - t0)*1000:.1f} ms")
+        print(f"Audio L Envelope:    {(t2 - t1)*1000:.1f} ms")
+        print(f"Audio R Envelope:    {(t3 - t2)*1000:.1f} ms")
+        print(f"Model Inference:     {(t4 - t3)*1000:.1f} ms")
+        print(f"TOTALE AAD TIJD:     {(t4 - t0)*1000:.1f} ms\n")
+
+        # Direct gebruiken (geen smoothing voor nu)
         self.attended_left = round(pred_prob)
 
         self.data_queue_phase2.put_nowait(pred_prob)

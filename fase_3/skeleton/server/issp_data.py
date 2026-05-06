@@ -90,8 +90,10 @@ class ISSPData:
     def get_doa_gt(self, pair_no):
         pair = f"pair{pair_no}"
         gt = np.load(os.path.join(self.microarray_dir, pair, "gt.npz"))
-        doa_0 = np.concatenate([np.repeat(e, n) for e, n in zip(gt["angles_l"], gt["endSamples_l"])])
-        doa_1 = np.concatenate([np.repeat(e, n) for e, n in zip(gt["angles_r"], gt["endSamples_r"])])
+        durations_l = np.diff(np.insert(gt["endSamples_l"], 0, 0))
+        durations_r = np.diff(np.insert(gt["endSamples_r"], 0, 0))
+        doa_0 = np.concatenate([np.repeat(e, n) for e, n in zip(gt["angles_l"], durations_l)])
+        doa_1 = np.concatenate([np.repeat(e, n) for e, n in zip(gt["angles_r"], durations_r)])
         return doa_0.tolist(), doa_1.tolist()
 
     def _cache_micro(self, pair):

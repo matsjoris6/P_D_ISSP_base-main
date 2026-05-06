@@ -5,7 +5,7 @@ import numpy as np
 
 from processor import Processor
 
-WINDOW_SIZE_SECONDS = 3  # Adjust your window size.
+WINDOW_SIZE_SECONDS = 5  # Adjust your window size.
 UPDATE_RATE = 32  # Corresponding to the server's update rate.
 
 sio = socketio.AsyncClient()
