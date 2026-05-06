@@ -54,11 +54,36 @@ source ../env/bin/activate
 ```
 
 ### Met AAD LSTM model (vereist Python 3.11 + TensorFlow)
+
+Twee modellen zijn beschikbaar in `fase_3/data/`:
+
+| Model | Bestand | Intern | Aanbevolen |
+|-------|---------|--------|-----------|
+| `hybrid` | `hybrid_v3_BEST.keras` | Heeft BatchNorm op EEG-input | Standaard keuze |
+| `generic` | `generic_dilated_alle_proefpersonen_beste_pieter_3laag.keras` | Geen BatchNorm | Gebruik met `AAD_NORMALIZE_EEG=1` |
+
 ```bash
 cd fase_3
 source ../env_tf/bin/activate
+
+# hybrid model (standaard, geen extra normalisatie nodig)
+PYTHON=$(which python) AAD_MODEL_NAME=hybrid ./run_demo.sh
+
+# generic model (z-score normalisatie aan)
+PYTHON=$(which python) AAD_MODEL_NAME=generic AAD_NORMALIZE_EEG=1 ./run_demo.sh
+
+# of expliciet pad
 PYTHON=$(which python) AAD_MODEL_PATH="$(pwd)/data/hybrid_v3_BEST.keras" ./run_demo.sh
 ```
+
+**Env vars voor AAD:**
+- `AAD_MODEL_NAME=hybrid` — zoekt `hybrid_*.keras` in `data/`
+- `AAD_MODEL_NAME=generic` — zoekt `generic_*.keras` in `data/`
+- `AAD_MODEL_PATH=/volledig/pad` — overschrijft naam-selectie
+- `AAD_NORMALIZE_EEG=1` — z-score normalisatie EEG per venster (aanbevolen voor `generic`)
+- `AAD_ENVELOPE=hilbert` — snellere envelope (default: `gammatone`)
+- `AAD_WINDOW_S=5` — venstergrootte in seconden (default: 5)
+- `AAD_HOP_S=1` — hop in seconden (default: 1)
 
 De browser opent automatisch op `http://localhost:8000`. Stop met **Ctrl-C**.
 

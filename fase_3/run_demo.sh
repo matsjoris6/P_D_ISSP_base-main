@@ -76,7 +76,46 @@ for p in "$MICROARRAY_DIR" "$EEG_DIR" "$STIMULI_DIR"; do
     fi
 done
 
-# ---- AAD args ----
+# ---- Beschikbare AAD-modellen tonen en selecteren ----
+#
+# Gebruik:
+#   AAD_MODEL_PATH=/volledig/pad/naar/model.keras ./run_demo.sh   # expliciet pad
+#   AAD_MODEL_NAME=hybrid ./run_demo.sh                            # zoekt hybrid_*.keras in data/
+#   AAD_MODEL_NAME=generic ./run_demo.sh                           # zoekt generic_*.keras in data/
+#   (geen env vars) ./run_demo.sh                                  # placeholder (geen TF nodig)
+#
+# AAD_NORMALIZE_EEG=1  -> z-score normaliseer EEG per venster (aanbevolen voor generic model)
+# AAD_ENVELOPE=hilbert -> snellere envelope (default: gammatone)
+
+DATA_MODEL_DIR="$THIS_DIR/data"
+
+# Lijst beschikbare .keras modellen
+echo "[demo] Beschikbare AAD-modellen in $DATA_MODEL_DIR:"
+AVAILABLE_MODELS=()
+while IFS= read -r -d '' f; do
+    AVAILABLE_MODELS+=("$f")
+    echo "  - $(basename "$f")"
+done < <(find "$DATA_MODEL_DIR" -maxdepth 1 -name "*.keras" -print0 2>/dev/null)
+if [[ ${#AVAILABLE_MODELS[@]} -eq 0 ]]; then
+    echo "  (geen .keras bestanden gevonden)"
+fi
+
+# Resolve AAD_MODEL_NAME -> AAD_MODEL_PATH
+if [[ -z "$AAD_MODEL_PATH" && -n "$AAD_MODEL_NAME" ]]; then
+    for f in "${AVAILABLE_MODELS[@]}"; do
+        if [[ "$(basename "$f")" == *"$AAD_MODEL_NAME"* ]]; then
+            AAD_MODEL_PATH="$f"
+            echo "[demo] AAD_MODEL_NAME='$AAD_MODEL_NAME' → $AAD_MODEL_PATH"
+            break
+        fi
+    done
+    if [[ -z "$AAD_MODEL_PATH" ]]; then
+        echo "[FATAL] Geen model gevonden met naam '$AAD_MODEL_NAME' in $DATA_MODEL_DIR"
+        exit 2
+    fi
+fi
+
+# Bouw AAD-argumenten
 AAD_ARGS=""
 if [[ -n "$AAD_MODEL_PATH" ]]; then
     if [[ ! -f "$AAD_MODEL_PATH" ]]; then
@@ -85,8 +124,22 @@ if [[ -n "$AAD_MODEL_PATH" ]]; then
     fi
     AAD_WINDOW_S="${AAD_WINDOW_S:-5}"
     AAD_HOP_S="${AAD_HOP_S:-1}"
+    AAD_ENVELOPE="${AAD_ENVELOPE:-gammatone}"
+    AAD_NORMALIZE_EEG="${AAD_NORMALIZE_EEG:-0}"
+    AAD_FS_AUDIO="${AAD_FS_AUDIO:-48000}"
+
     AAD_ARGS="--aad_model_path $AAD_MODEL_PATH --aad_window_s $AAD_WINDOW_S --aad_hop_s $AAD_HOP_S"
-    echo "[demo] AAD model: $AAD_MODEL_PATH (window=${AAD_WINDOW_S}s, hop=${AAD_HOP_S}s)"
+    AAD_ARGS="$AAD_ARGS --aad_envelope $AAD_ENVELOPE"
+    AAD_ARGS="$AAD_ARGS --aad_fs_audio $AAD_FS_AUDIO"
+    if [[ "$AAD_NORMALIZE_EEG" == "1" || "$AAD_NORMALIZE_EEG" == "true" ]]; then
+        AAD_ARGS="$AAD_ARGS --aad_normalize_eeg"
+    fi
+    echo "[demo] AAD model  : $(basename "$AAD_MODEL_PATH")"
+    echo "[demo] AAD window : ${AAD_WINDOW_S}s / hop=${AAD_HOP_S}s"
+    echo "[demo] AAD envelope: $AAD_ENVELOPE, fs_audio=${AAD_FS_AUDIO}Hz, normalize_eeg=${AAD_NORMALIZE_EEG}"
+else
+    echo "[demo] Geen AAD model → placeholder modus (geen TF nodig)"
+    echo "[demo] Tip: gebruik AAD_MODEL_NAME=hybrid of AAD_MODEL_NAME=generic om een model te selecteren"
 fi
 
 # ---- Poort 8000 vrijmaken indien bezet ----

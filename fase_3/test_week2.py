@@ -122,8 +122,13 @@ def test_doa_gt_fix(microarray_dir, pair_no):
 # Test 2 — AAD LSTM standalone
 # ---------------------------------------------------------------------------
 
-def test_aad_lstm(aad_model_path, fs_audio=16000, fs_eeg=128,
-                  window_s=5.0, hop_s=1.0, n_chunks=8, envelope="gammatone"):
+def test_aad_lstm(aad_model_path, fs_audio=48000, fs_eeg=128,
+                  window_s=5.0, hop_s=1.0, n_chunks=8, envelope="gammatone",
+                  normalize_eeg=False):
+    """Test AAD LSTM module.
+
+    fs_audio=48000: stimuli WAVs zijn 48 kHz (niet de mic-rate van 16 kHz!).
+    """
     print("\n=== Test 2: AAD LSTM standalone ===")
 
     from algorithms.aad_lstm import AADLSTM, GammatoneEnvelope, HilbertEnvelope
@@ -131,19 +136,20 @@ def test_aad_lstm(aad_model_path, fs_audio=16000, fs_eeg=128,
     # Test envelope-extractors onafhankelijk van model
     print("  Gammatone envelope test...")
     env_gt = GammatoneEnvelope(fs_audio=fs_audio, fs_target=fs_eeg)
-    dummy_audio = np.random.randn(fs_audio).astype(np.float32)  # 1s synthetisch
+    dummy_audio = np.random.randn(fs_audio).astype(np.float32)  # 1s synthetisch @ 48kHz
     env_out = env_gt(dummy_audio)
     assert env_out.shape[0] == fs_eeg, \
-        f"Gammatone output lengte fout: {env_out.shape[0]} != {fs_eeg}"
+        f"Gammatone output lengte fout: {env_out.shape[0]} != {fs_eeg} " \
+        f"(fs_audio={fs_audio}, fs_eeg={fs_eeg}, decim={fs_audio//fs_eeg})"
     assert not np.any(np.isnan(env_out)), "Gammatone output bevat NaN"
-    print(f"  Gammatone: input {len(dummy_audio)} samples → output {len(env_out)} @ {fs_eeg}Hz  ✓")
+    print(f"  Gammatone: input {len(dummy_audio)} samples @ {fs_audio}Hz → output {len(env_out)} @ {fs_eeg}Hz  ✓")
 
     print("  Hilbert envelope test...")
     env_hb = HilbertEnvelope(fs_audio=fs_audio, fs_target=fs_eeg)
     env_out_h = env_hb(dummy_audio)
     assert env_out_h.shape[0] == fs_eeg, \
         f"Hilbert output lengte fout: {env_out_h.shape[0]} != {fs_eeg}"
-    print(f"  Hilbert:   input {len(dummy_audio)} samples → output {len(env_out_h)} @ {fs_eeg}Hz  ✓")
+    print(f"  Hilbert:   input {len(dummy_audio)} samples @ {fs_audio}Hz → output {len(env_out_h)} @ {fs_eeg}Hz  ✓")
 
     if aad_model_path is None:
         print("  --aad_model_path niet gegeven → skip model-predict test")
@@ -171,11 +177,12 @@ def test_aad_lstm(aad_model_path, fs_audio=16000, fs_eeg=128,
         window_s=window_s,
         hop_s=hop_s,
         envelope=envelope,
+        normalize_eeg=normalize_eeg,
     )
     print(f"  Model geladen in {time.time()-t0:.1f}s")
 
-    # Synthetische chunks: 1s audio + 1s EEG per chunk
-    chunk_audio = fs_audio          # 1s
+    # Synthetische chunks: 1s audio @ 48kHz + 1s EEG @ 128Hz per chunk
+    chunk_audio = fs_audio          # 1s @ 48kHz = 48000 samples
     chunk_eeg = fs_eeg              # 1s = 128 samples
     n_eeg_ch = 64
 
@@ -407,9 +414,12 @@ def main():
     parser.add_argument("--duration", type=float, default=30.0,
                         help="Seconden audio voor processor-test (default: 30s)")
     parser.add_argument("--aad_model_path", type=str, default=None,
-                        help="Pad naar hybrid_v3_BEST.keras (optioneel; zonder: placeholder)")
+                        help="Pad naar .keras model (optioneel; zonder: placeholder). "
+                             "Laat leeg voor auto-detect in data/.")
     parser.add_argument("--aad_envelope", type=str, default="gammatone",
                         choices=["gammatone", "hilbert"])
+    parser.add_argument("--aad_normalize_eeg", action="store_true", default=False,
+                        help="Z-score normaliseer EEG per venster. Aanbevolen voor generic_dilated model.")
     parser.add_argument("--data_base", type=str, default=None,
                         help="Root van data-map (auto-detect als niet gegeven)")
     args = parser.parse_args()
@@ -435,9 +445,11 @@ def main():
     print(f"Pair: {args.pair}, scenario: {args.scenario}")
     print(f"Data: {microarray_dir}")
     print(f"AAD model: {args.aad_model_path or 'geen (placeholder)'}")
+    print(f"AAD normalize_eeg: {args.aad_normalize_eeg}")
 
     test_doa_gt_fix(microarray_dir, args.pair)
-    test_aad_lstm(args.aad_model_path, envelope=args.aad_envelope)
+    test_aad_lstm(args.aad_model_path, envelope=args.aad_envelope,
+                  normalize_eeg=args.aad_normalize_eeg)
     test_processor(microarray_dir, args.pair,
                    aad_model_path=args.aad_model_path,
                    duration_s=args.duration,

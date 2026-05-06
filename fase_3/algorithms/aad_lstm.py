@@ -89,6 +89,9 @@ class GammatoneEnvelope:
         if factor < 1:
             factor = 1
         env_ds = env_lp[::factor]
+        # Clip voor overflow-veiligheid (IIR-filters kunnen grote transients geven
+        # bij random-noise of stilte-segmenten; heeft geen effect op echte spraak).
+        env_ds = np.nan_to_num(env_ds, nan=0.0, posinf=1e6, neginf=-1e6)
         return env_ds.astype(np.float32)
 
 
@@ -122,7 +125,7 @@ class AADLSTM:
     """Wrapper rond Keras dilated+LSTM AAD-model met sliding window.
 
     Usage:
-        aad = AADLSTM("path/to/model.keras", fs_audio=16000)
+        aad = AADLSTM("path/to/model.keras")
         for each_1s_chunk in stream:
             pred = aad.update(eeg_chunk, sig_left, sig_right)
             if pred is not None:
@@ -134,17 +137,24 @@ class AADLSTM:
     er minstens `window_s` seconden in de buffer staan.
 
     Args:
-        model_path: pad naar .keras of .h5 model
-        fs_audio: audio sample rate (default 16000)
-        fs_eeg: EEG sample rate (default 128)
+        model_path    : pad naar .keras of .h5 model
+        fs_audio      : sample rate van de audio-stimuli (default 48000 Hz — de
+                        fase-3 stimuli WAVs zijn altijd 48 kHz, NIET de mic-rate).
+                        OPGELET: dit is de fs van audio1/audio2 die de server stuurt,
+                        niet de LMA-microfoonsignalen (die zijn 16 kHz).
+        fs_eeg        : EEG sample rate (default 128)
         n_eeg_channels: aantal EEG-kanalen (default 64)
-        window_s: predictie-venster in seconden (default 5.0)
-        hop_s: predictie-hop in seconden (default 1.0)
-        envelope: 'gammatone' | 'hilbert' (default 'gammatone')
+        window_s      : predictie-venster in seconden (default 5.0)
+        hop_s         : predictie-hop in seconden (default 1.0)
+        envelope      : 'gammatone' | 'hilbert' (default 'gammatone')
+        normalize_eeg : als True, z-score normaliseert het EEG per venster per kanaal.
+                        Aanbevolen voor modellen zonder interne BatchNorm-laag
+                        (bv. generic_dilated). Voor hybrid_v3 niet nodig (heeft
+                        EEG_BN_Input intern).
     """
 
-    def __init__(self, model_path, fs_audio=16000, fs_eeg=128, n_eeg_channels=64,
-                 window_s=5.0, hop_s=1.0, envelope="gammatone"):
+    def __init__(self, model_path, fs_audio=48000, fs_eeg=128, n_eeg_channels=64,
+                 window_s=5.0, hop_s=1.0, envelope="gammatone", normalize_eeg=False):
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"AAD model niet gevonden: {model_path}")
 
@@ -159,11 +169,28 @@ class AADLSTM:
         inputs = self.model.inputs if hasattr(self.model, "inputs") else [self.model.input]
         print(f"[AADLSTM] Inputs: {[(i.name, tuple(i.shape)) for i in inputs]}")
 
+        # Auto-detect of model interne normalisatie heeft (BatchNorm op EEG input)
+        self._model_has_eeg_bn = self._detect_eeg_batchnorm()
+        if self._model_has_eeg_bn:
+            print("[AADLSTM] Model heeft interne EEG BatchNorm → externe normalisatie niet nodig")
+        else:
+            print("[AADLSTM] Model heeft GEEN interne EEG BatchNorm")
+            if not normalize_eeg:
+                print("[AADLSTM] WAARSCHUWING: normalize_eeg=False maar model heeft geen BN. "
+                      "Overweeg normalize_eeg=True voor betere accuracy.")
+
+        self.normalize_eeg = normalize_eeg
         self.fs_audio = fs_audio
         self.fs_eeg = fs_eeg
         self.n_eeg_channels = n_eeg_channels
         self.window_samples_eeg = int(round(window_s * fs_eeg))
         self.hop_samples_eeg = int(round(hop_s * fs_eeg))
+
+        # Sanity-check: decimatiefactor voor envelope
+        self._decim_factor = int(round(fs_audio / fs_eeg))
+        print(f"[AADLSTM] Audio fs={fs_audio} Hz, EEG fs={fs_eeg} Hz, "
+              f"decimatiefactor={self._decim_factor}, "
+              f"venster={self.window_samples_eeg} EEG-samples ({window_s}s)")
 
         # Envelope-extractor (gammatone of hilbert)
         if envelope == "gammatone":
@@ -179,6 +206,19 @@ class AADLSTM:
         self.env_r_buf = np.zeros(0, dtype=np.float32)
         self._last_pred = 0.5
         self._n_predictions = 0
+
+    def _detect_eeg_batchnorm(self):
+        """Kijk of het model een BatchNorm-laag heeft op de EEG-tak."""
+        try:
+            for layer in self.model.layers:
+                class_name = layer.__class__.__name__.lower()
+                # BatchNormalization → "batchnormalization" (geen underscore)
+                if "batchnorm" in class_name:
+                    if "eeg" in layer.name.lower():
+                        return True
+            return False
+        except Exception:
+            return False
 
     def reset(self):
         self.eeg_buf = np.zeros((0, self.n_eeg_channels), dtype=np.float32)
@@ -228,6 +268,13 @@ class AADLSTM:
         env_l_w = self.env_l_buf[-self.window_samples_eeg :]  # (640,)
         env_r_w = self.env_r_buf[-self.window_samples_eeg :]  # (640,)
 
+        # Optionele EEG z-score normalisatie per venster per kanaal.
+        # Aanbevolen voor modellen zonder interne BatchNorm (bv. generic_dilated).
+        if self.normalize_eeg:
+            mu = eeg_w.mean(axis=0, keepdims=True)
+            sigma = eeg_w.std(axis=0, keepdims=True) + 1e-8
+            eeg_w = (eeg_w - mu) / sigma
+
         # Reshape naar batch + channel: (1, 640, 64) en (1, 640, 1)
         eeg_in = eeg_w[np.newaxis, ...]
         env_l_in = env_l_w[np.newaxis, :, np.newaxis]
@@ -235,6 +282,14 @@ class AADLSTM:
 
         pred = self.model.predict([eeg_in, env_l_in, env_r_in], verbose=0)
         pred_prob = float(np.asarray(pred).flatten()[0])
+
+        # NaN-guard: als model NaN geeft (bv. bij extreme input of slechte
+        # normalisatie), val terug op de vorige predictie.
+        if np.isnan(pred_prob) or np.isinf(pred_prob):
+            pred_prob = self._last_pred
+        else:
+            pred_prob = float(np.clip(pred_prob, 0.0, 1.0))
+
         self._last_pred = pred_prob
         self._n_predictions += 1
 

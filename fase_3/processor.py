@@ -63,7 +63,8 @@ class Processor:
                  sv_model="rir", snr_weight=False, use_fb=None,
                  doa_tracker_alpha=0.3, doa_tracker_window=5, doa_tracker_outlier=30.0,
                  aad_model_path=None, aad_window_s=5.0, aad_hop_s=1.0,
-                 aad_envelope="gammatone"):
+                 aad_envelope="gammatone", aad_normalize_eeg=False,
+                 aad_fs_audio=48000):
         """
         Parameters
         ----------
@@ -199,18 +200,26 @@ class Processor:
         # ---- AAD LSTM (optioneel; placeholder als aad_model_path is None) ----
         # Het Colab-getrainde dilated+LSTM model voorspelt op 5s vensters @ 1s hop
         # uit (eeg, env_left, env_right) -> P(attended_left).
+        #
+        # BELANGRIJK: aad_fs_audio is de sample rate van de STIMULI (audio1/audio2
+        # uit de server), NIET de mic-sample rate (self.fs=16kHz). De fase-3 stimuli
+        # WAVs zijn 48 kHz. Als je hier self.fs (=16kHz) zou meegeven, berekent
+        # GammatoneEnvelope een verkeerde decimatiefactor (125 i.p.v. 375) waardoor
+        # de envelope 3x te veel samples heeft en de buffer-sync fout loopt.
         self.aad = None
         if aad_model_path is not None and os.path.exists(aad_model_path):
             from algorithms.aad_lstm import AADLSTM
             self.aad = AADLSTM(
                 model_path=aad_model_path,
-                fs_audio=fs,
+                fs_audio=aad_fs_audio,   # stimuli-fs (48kHz), niet mic-fs (16kHz)!
                 fs_eeg=128,
                 window_s=aad_window_s,
                 hop_s=aad_hop_s,
                 envelope=aad_envelope,
+                normalize_eeg=aad_normalize_eeg,
             )
-            print(f"[Processor] AAD model geladen ({aad_window_s}s window, {aad_hop_s}s hop, env={aad_envelope})")
+            print(f"[Processor] AAD model geladen ({aad_window_s}s window, {aad_hop_s}s hop, "
+                  f"env={aad_envelope}, normalize_eeg={aad_normalize_eeg}, fs_audio={aad_fs_audio})")
         else:
             if aad_model_path is not None:
                 print(f"[Processor] WARNING: aad_model_path bestaat niet: {aad_model_path}")

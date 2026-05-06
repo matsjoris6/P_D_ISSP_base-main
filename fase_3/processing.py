@@ -149,6 +149,12 @@ if __name__ == "__main__":
     parser.add_argument("--aad_envelope", type=str, default="gammatone",
                         choices=["gammatone", "hilbert"],
                         help="Audio-envelope methode voor AAD")
+    parser.add_argument("--aad_normalize_eeg", action="store_true", default=False,
+                        help="Z-score normaliseer EEG per venster per kanaal voor AAD. "
+                             "Aanbevolen voor modellen zonder interne BatchNorm (bv. generic_dilated).")
+    parser.add_argument("--aad_fs_audio", type=int, default=48000,
+                        help="Sample rate van de audio-stimuli die de server stuurt (default 48000 Hz). "
+                             "Niet de mic-rate! Fase-3 stimuli zijn 48 kHz WAVs.")
     args = parser.parse_args()
 
     if args.data_dir is not None:
@@ -168,6 +174,8 @@ if __name__ == "__main__":
         aad_window_s=args.aad_window_s,
         aad_hop_s=args.aad_hop_s,
         aad_envelope=args.aad_envelope,
+        aad_normalize_eeg=args.aad_normalize_eeg,
+        aad_fs_audio=args.aad_fs_audio,
     )
 
     asyncio.run(main(args.pair_no, args.subject_no))
