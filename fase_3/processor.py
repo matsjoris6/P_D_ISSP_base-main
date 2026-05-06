@@ -62,7 +62,7 @@ class Processor:
                  doa_update_every=4, bin_range="auto", combine="geometric",
                  sv_model="rir", snr_weight=False, use_fb=None,
                  doa_tracker_alpha=0.3, doa_tracker_window=5, doa_tracker_outlier=30.0,
-                 aad_model_path=None, aad_window_s=5.0, aad_hop_s=1.0,
+                 aad_model_path=None, aad_window_s=3.0, aad_hop_s=1.0,
                  aad_envelope="gammatone", aad_normalize_eeg=False,
                  aad_fs_audio=48000):
         """
