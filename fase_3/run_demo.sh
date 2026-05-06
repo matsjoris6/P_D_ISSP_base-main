@@ -129,6 +129,7 @@ cd "$SERVER_DIR"
     --eeg_data_path "$EEG_DIR" \
     --stimuli_path "$STIMULI_DIR" \
     --num_pairs 15 \
+    --aad_window_size "${AAD_HOP_S:-1}" \
     > "$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
