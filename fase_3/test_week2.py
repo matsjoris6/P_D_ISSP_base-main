@@ -27,6 +27,16 @@ Gebruik:
     python fase_3/test_week2.py --pair 5 --scenario reverberant   # ander pair/scenario
     python fase_3/test_week2.py --data_base /pad/naar/data        # expliciet data-pad
 """
+
+
+# ALS JE ECHT MET AAD WIL TESTEN: DOE DIT DAN: cd /Users/macbookmats/Desktop/P_D_ISSP_base-main
+# source env_tf/bin/activate
+# python fase_3/test_week2.py
+# EN ALS JE ENV NOG NIET HEBT AANGEMAAKT:
+# python3.11 -m venv env_tf
+# source env_tf/bin/activate
+# pip install tensorflow numpy scipy python-socketio
+
 import argparse
 import asyncio
 import os
