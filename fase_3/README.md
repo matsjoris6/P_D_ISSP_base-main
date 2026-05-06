@@ -81,7 +81,7 @@ PYTHON=$(which python) AAD_MODEL_PATH="$(pwd)/data/hybrid_v3_BEST.keras" ./run_d
 - `AAD_MODEL_NAME=generic` — zoekt `generic_*.keras` in `data/`
 - `AAD_MODEL_PATH=/volledig/pad` — overschrijft naam-selectie
 - `AAD_NORMALIZE_EEG=1` — z-score normalisatie EEG per venster (aanbevolen voor `generic`)
-- `AAD_ENVELOPE=hilbert` — snellere envelope (default: `gammatone`)
+- `AAD_ENVELOPE=hilbert` — snellere + stabielere envelope (default; gammatone IIR is onstabiel bij 48kHz)
 - `AAD_WINDOW_S=5` — venstergrootte in seconden (default: 5)
 - `AAD_HOP_S=1` — hop in seconden (default: 1)
 

@@ -124,7 +124,7 @@ if [[ -n "$AAD_MODEL_PATH" ]]; then
     fi
     AAD_WINDOW_S="${AAD_WINDOW_S:-5}"
     AAD_HOP_S="${AAD_HOP_S:-1}"
-    AAD_ENVELOPE="${AAD_ENVELOPE:-gammatone}"
+    AAD_ENVELOPE="${AAD_ENVELOPE:-hilbert}"
     AAD_NORMALIZE_EEG="${AAD_NORMALIZE_EEG:-0}"
     AAD_FS_AUDIO="${AAD_FS_AUDIO:-48000}"
 

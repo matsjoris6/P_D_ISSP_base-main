@@ -146,9 +146,10 @@ if __name__ == "__main__":
                         help="AAD predictie-venster in seconden (default 5)")
     parser.add_argument("--aad_hop_s", type=float, default=1.0,
                         help="AAD predictie-hop in seconden (default 1)")
-    parser.add_argument("--aad_envelope", type=str, default="gammatone",
+    parser.add_argument("--aad_envelope", type=str, default="hilbert",
                         choices=["gammatone", "hilbert"],
-                        help="Audio-envelope methode voor AAD")
+                        help="Audio-envelope methode voor AAD (default: hilbert — stabieler bij 48kHz). "
+                             "gammatone IIR is onstabiel voor lage banden bij 48kHz.")
     parser.add_argument("--aad_normalize_eeg", action="store_true", default=False,
                         help="Z-score normaliseer EEG per venster per kanaal voor AAD. "
                              "Aanbevolen voor modellen zonder interne BatchNorm (bv. generic_dilated).")

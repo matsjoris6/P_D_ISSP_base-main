@@ -37,38 +37,60 @@ class GammatoneEnvelope:
     """Gammatone-bank envelope-extractor voor speech-signalen.
 
     Pipeline (per audio-chunk):
-      1. Filter via gammatone-bank (28 bands, 80-6000 Hz ERB-spaced)
+      1. Filter via gammatone-bank (stabiele banden, ERB-spaced)
       2. Per band: |hilbert(x)| -> instantaneous envelope
       3. Power-law compressie envelope^0.6 (auditieve compressie)
       4. Som over banden -> single-channel envelope
-      5. Lowpass 32Hz Butterworth (anti-alias voor downsample)
+      5. Lowpass Butterworth (anti-alias voor downsample)
       6. Downsample naar fs_target via decimatie
 
-    Implementatie is stateless tussen chunks (filterbank state niet bewaard) maar
-    voor 5s chunks is dat geen probleem; minor edge-effecten alleen in eerste/laatste
-    paar samples van elke chunk.
+    OPGELET: scipy's gammatone IIR-filter heeft onstabiele Polen (pool > 1.0)
+    voor lage center-frequenties bij hoge sample rates (bv. 80 Hz bij 48kHz).
+    Dit leidt tot divergerende filter-output (inf-waarden) en NaN-output van het
+    model. Banden met onstabiele Polen worden automatisch overgeslagen; de
+    stabiele bandenlijst wordt geprint bij initialisatie.
+
+    Als alle banden onstabiel zijn (of je wil meer snelheid/stabiliteit):
+    gebruik HilbertEnvelope als drop-in vervanging.
     """
 
-    def __init__(self, fs_audio=16000, fs_target=128, n_bands=28,
-                 low_hz=80.0, high_hz=6000.0):
+    def __init__(self, fs_audio=48000, fs_target=128, n_bands=28,
+                 low_hz=80.0, high_hz=6000.0, max_pole_mag=0.9999):
         self.fs_audio = fs_audio
         self.fs_target = fs_target
         self.n_bands = n_bands
-        self.centers = _erb_space(low_hz, high_hz, n_bands)
+        all_centers = _erb_space(low_hz, high_hz, n_bands)
+
+        # Filter onstabiele banden (pool buiten eenheidscirkel)
+        self.centers = []
+        self._filters = []  # pre-compute (b, a) coefficients
+        n_skipped = 0
+        for cf in all_centers:
+            b, a = ss.gammatone(cf, ftype="iir", fs=fs_audio)
+            poles = np.roots(a)
+            if np.max(np.abs(poles)) < max_pole_mag:
+                self.centers.append(cf)
+                self._filters.append((b, a))
+            else:
+                n_skipped += 1
+        self.centers = np.array(self.centers)
+        if n_skipped > 0:
+            print(f"[GammatoneEnvelope] {n_skipped}/{n_bands} onstabiele banden overgeslagen "
+                  f"bij fs={fs_audio}Hz (pool >= {max_pole_mag}). "
+                  f"Gebruik {len(self.centers)} stabiele banden.")
+        if len(self.centers) == 0:
+            raise RuntimeError(
+                f"Alle {n_bands} gammatone-banden zijn onstabiel bij fs={fs_audio}Hz. "
+                f"Gebruik HilbertEnvelope of verlaag fs_audio."
+            )
 
         # Anti-alias lowpass voor decimatie (cutoff = 0.4 * Nyquist target)
         self._aa_sos = ss.butter(8, 0.4 * (fs_target / 2), btype="low",
                                   fs=fs_audio, output="sos")
 
-    def _gammatone_filter(self, x, cf):
-        """Pas Gammatone IIR-filter toe voor center frequency cf."""
-        # scipy.signal.gammatone retourneert (b, a) IIR coefficients
-        b, a = ss.gammatone(cf, ftype="iir", fs=self.fs_audio)
-        return ss.lfilter(b, a, x)
-
     def __call__(self, audio):
         """Extract envelope. audio: 1D float, shape (N,) @ fs_audio.
-        Returns: 1D float, shape (M,) @ fs_target waarbij M = N * fs_target/fs_audio.
+        Returns: 1D float, shape (M,) @ fs_target waarbij M ≈ N * fs_target/fs_audio.
         """
         x = np.asarray(audio, dtype=np.float64)
         if x.ndim != 1:
@@ -76,22 +98,21 @@ class GammatoneEnvelope:
 
         # --- Bouw envelope: gammatone -> hilbert magnitude -> compress -> sum ---
         env = np.zeros_like(x)
-        for cf in self.centers:
-            band = self._gammatone_filter(x, cf)
+        for b, a in self._filters:
+            band = ss.lfilter(b, a, x)
             mag = np.abs(ss.hilbert(band))
-            env += np.power(mag + 1e-12, 0.6)
-        env /= self.n_bands
+            env += np.power(np.clip(mag, 0, None) + 1e-12, 0.6)
+        env /= max(len(self._filters), 1)
 
         # --- Anti-alias lowpass + downsample ---
         env_lp = ss.sosfilt(self._aa_sos, env)
-        # Decimatie-factor (integer)
         factor = int(round(self.fs_audio / self.fs_target))
         if factor < 1:
             factor = 1
         env_ds = env_lp[::factor]
-        # Clip voor overflow-veiligheid (IIR-filters kunnen grote transients geven
-        # bij random-noise of stilte-segmenten; heeft geen effect op echte spraak).
-        env_ds = np.nan_to_num(env_ds, nan=0.0, posinf=1e6, neginf=-1e6)
+        # Clip voor resterende numerieke fouten (bijv. door resterende grens-banden)
+        env_ds = np.clip(np.nan_to_num(env_ds, nan=0.0, posinf=0.0, neginf=0.0),
+                         0.0, np.finfo(np.float32).max)
         return env_ds.astype(np.float32)
 
 
@@ -146,7 +167,10 @@ class AADLSTM:
         n_eeg_channels: aantal EEG-kanalen (default 64)
         window_s      : predictie-venster in seconden (default 5.0)
         hop_s         : predictie-hop in seconden (default 1.0)
-        envelope      : 'gammatone' | 'hilbert' (default 'gammatone')
+        envelope      : 'hilbert' | 'gammatone' (default 'hilbert').
+                        OPGELET: 'gammatone' gebruikt scipy IIR-filters die onstabiel
+                        zijn voor lage frequenties bij 48kHz (lage banden worden dan
+                        automatisch overgeslagen). 'hilbert' is stabieler en sneller.
         normalize_eeg : als True, z-score normaliseert het EEG per venster per kanaal.
                         Aanbevolen voor modellen zonder interne BatchNorm-laag
                         (bv. generic_dilated). Voor hybrid_v3 niet nodig (heeft
@@ -154,7 +178,7 @@ class AADLSTM:
     """
 
     def __init__(self, model_path, fs_audio=48000, fs_eeg=128, n_eeg_channels=64,
-                 window_s=5.0, hop_s=1.0, envelope="gammatone", normalize_eeg=False):
+                 window_s=5.0, hop_s=1.0, envelope="hilbert", normalize_eeg=False):
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"AAD model niet gevonden: {model_path}")
 

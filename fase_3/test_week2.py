@@ -47,10 +47,16 @@ pip install tensorflow numpy scipy "python-socketio[asyncio]" uvicorn fastapi ma
 """
 
 # EN DAN:
+
 """
 cd fase_3
 source ../env_tf/bin/activate
-PYTHON=$(which python) AAD_MODEL_PATH="$(pwd)/data/hybrid_v3_BEST.keras" ./run_demo.sh
+"""
+# EN DAN VOOR AAD MODEL:
+
+""""
+PYTHON=$(which python) AAD_MODEL_NAME=hybrid ./run_demo.sh
+PYTHON=$(which python) AAD_MODEL_NAME=generic AAD_NORMALIZE_EEG=1 ./run_demo.sh
 """
 
 import argparse
@@ -123,7 +129,7 @@ def test_doa_gt_fix(microarray_dir, pair_no):
 # ---------------------------------------------------------------------------
 
 def test_aad_lstm(aad_model_path, fs_audio=48000, fs_eeg=128,
-                  window_s=5.0, hop_s=1.0, n_chunks=8, envelope="gammatone",
+                  window_s=5.0, hop_s=1.0, n_chunks=8, envelope="hilbert",
                   normalize_eeg=False):
     """Test AAD LSTM module.
 
@@ -416,8 +422,9 @@ def main():
     parser.add_argument("--aad_model_path", type=str, default=None,
                         help="Pad naar .keras model (optioneel; zonder: placeholder). "
                              "Laat leeg voor auto-detect in data/.")
-    parser.add_argument("--aad_envelope", type=str, default="gammatone",
-                        choices=["gammatone", "hilbert"])
+    parser.add_argument("--aad_envelope", type=str, default="hilbert",
+                        choices=["gammatone", "hilbert"],
+                        help="Envelope-type voor AAD (default: hilbert — stabieler bij 48kHz)")
     parser.add_argument("--aad_normalize_eeg", action="store_true", default=False,
                         help="Z-score normaliseer EEG per venster. Aanbevolen voor generic_dilated model.")
     parser.add_argument("--data_base", type=str, default=None,
