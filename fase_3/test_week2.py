@@ -209,6 +209,15 @@ def test_processor(microarray_dir, pair_no, aad_model_path=None,
     lft = lft[:n_samples]
     rgt = rgt[:n_samples]
 
+    # Ground truth DOA (zelfde logica als test_week1 + get_doa_gt fix)
+    gt = np.load(os.path.join(pair_dir, "gt.npz"))
+    dur_l = np.diff(np.concatenate([[0], gt["endSamples_l"]]))
+    dur_r = np.diff(np.concatenate([[0], gt["endSamples_r"]]))
+    doa_l_gt = np.concatenate([np.repeat(a, n) for a, n in zip(gt["angles_l"], dur_l)])
+    doa_r_gt = np.concatenate([np.repeat(a, n) for a, n in zip(gt["angles_r"], dur_r)])
+    doa_l_gt = doa_l_gt[:n_samples] if len(doa_l_gt) >= n_samples else np.pad(doa_l_gt, (0, n_samples - len(doa_l_gt)), constant_values=doa_l_gt[-1])
+    doa_r_gt = doa_r_gt[:n_samples] if len(doa_r_gt) >= n_samples else np.pad(doa_r_gt, (0, n_samples - len(doa_r_gt)), constant_values=doa_r_gt[-1])
+
     # Processor aanmaken
     proc = Processor(
         data_dir=microarray_dir,
@@ -313,9 +322,15 @@ def test_processor(microarray_dir, pair_no, aad_model_path=None,
     n_rows = 3
     fig, axes = plt.subplots(n_rows, 1, figsize=(12, 9))
 
-    # DOA
+    # DOA — estimate + ground truth
+    # Ground truth samplen op dezelfde tijdstippen als de log
+    gt_l_sampled = [float(doa_l_gt[min(int(ti * fs), n_samples - 1)]) for ti in t]
+    gt_r_sampled = [float(doa_r_gt[min(int(ti * fs), n_samples - 1)]) for ti in t]
+
     axes[0].plot(t, log_doa_left,  label="DOA links (est)",  color="C0")
+    axes[0].plot(t, gt_l_sampled,  label="DOA links (gt)",   color="C0", linestyle="--", alpha=0.6)
     axes[0].plot(t, log_doa_right, label="DOA rechts (est)", color="C1")
+    axes[0].plot(t, gt_r_sampled,  label="DOA rechts (gt)",  color="C1", linestyle="--", alpha=0.6)
     axes[0].set_ylabel("DOA (graden)")
     axes[0].set_title(f"Pair {pair_no} {scenario} — week 2 processor output")
     axes[0].legend()
