@@ -20,22 +20,38 @@ Test de drie nieuwe onderdelen zonder server of GUI:
       alle drie queues (phase1, phase2, phase3) data produceren.
       Met --aad_model_path: AAD-predictions komen van het model.
       Zonder: placeholder (alterneert elke ~30s).
-
-Gebruik:
-    python fase_3/test_week2.py                                    # tests 1 + 3 (placeholder AAD)
-    python fase_3/test_week2.py --aad_model_path data/hybrid_v3_BEST.keras  # alle 3 tests
-    python fase_3/test_week2.py --pair 5 --scenario reverberant   # ander pair/scenario
-    python fase_3/test_week2.py --data_base /pad/naar/data        # expliciet data-pad
 """
 
+# ZORG DA U BESTANDEN ZO STAAN:
+# fase_3/data/phase3_audioData/audiodata_batch_1/anechoic/
+# fase_3/data/phase3_audioData/audiodata_batch_1/reverberant/
+# fase_3/data/data_phase3/
+# fase_3/data/data_phase3/stimuli/
+# fase_3/data/hybrid_v3_BEST.keras
 
 # ALS JE ECHT MET AAD WIL TESTEN: DOE DIT DAN: cd /Users/macbookmats/Desktop/P_D_ISSP_base-main
-# source env_tf/bin/activate
-# python fase_3/test_week2.py
-# EN ALS JE ENV NOG NIET HEBT AANGEMAAKT:
-# python3.11 -m venv env_tf
-# source env_tf/bin/activate
-# pip install tensorflow numpy scipy python-socketio
+""" source env_tf/bin/activate
+    python fase_3/test_week2.py
+    EN ALS JE ENV NOG NIET HEBT AANGEMAAKT:
+    python3.11 -m venv env_tf
+    source env_tf/bin/activate
+    pip install tensorflow numpy scipy python-socketio
+"""
+
+#ALS JE DE GUI WIL TESTEN MET AAD MODEL:
+""" 
+python3.11 -m venv env_tf
+source env_tf/bin/activate
+pip install tensorflow numpy scipy "python-socketio[asyncio]" uvicorn fastapi matplotlib
+
+"""
+
+# EN DAN:
+"""
+cd fase_3
+source ../env_tf/bin/activate
+PYTHON=$(which python) AAD_MODEL_PATH="$(pwd)/data/hybrid_v3_BEST.keras" ./run_demo.sh
+"""
 
 import argparse
 import asyncio
