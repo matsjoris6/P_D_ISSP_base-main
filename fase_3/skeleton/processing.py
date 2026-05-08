@@ -36,7 +36,7 @@ async def process_phase2():
     audio1 = np.frombuffer(window["audio1"], dtype=np.float32)
     audio2 = np.frombuffer(window["audio2"], dtype=np.float32)
 
-    data_processor.processing_eeg_gt_audio(eeg, audio1, audio2)
+    data_processor.processing_eeg_gt_audio(eeg, audio1, audio2) #asyncio wait to thread
 
 
 async def send_processed_data_phase1():

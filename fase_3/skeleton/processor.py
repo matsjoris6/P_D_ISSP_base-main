@@ -5,7 +5,7 @@ from scipy import signal
 import logging
 logging.getLogger('brian2').setLevel(logging.ERROR)
 import brian2
-brian2.prefs.codegen.target = 'numpy'
+brian2.prefs.codegen.target = 'cython'
 from brian2 import Hz, kHz
 from brian2hears import Sound, erbspace, Gammatone, Filterbank
 from math import gcd
@@ -84,7 +84,7 @@ class EnvelopeFromGammatoneFilterbank(Filterbank):
 
 
 def compute_audio_envelope(audio_data, sr_in, sr_out=64, lowcut=1.0, highcut=32.0):
-    """Functioneel identiek aan process_audio_file uit phase 2."""
+    
     sound = Sound(audio_data.reshape(-1, 1), samplerate=sr_in * Hz)
     cf = erbspace(50 * Hz, 5 * kHz, 28)
     gammatone_filterbank = Gammatone(sound, cf)
@@ -100,7 +100,7 @@ def compute_audio_envelope(audio_data, sr_in, sr_out=64, lowcut=1.0, highcut=32.
 
 
 def preprocess_eeg(eeg_data, fs_in, fs_out=64, lowcut=1.0, highcut=32.0):
-    """Functioneel identiek aan process_eeg_file uit phase 2."""
+    
     sos = signal.butter(N=4, Wn=[lowcut, highcut], btype='bandpass', fs=fs_in, output='sos')
     eeg_filtered = signal.sosfiltfilt(sos, eeg_data, axis=0)
 
@@ -222,11 +222,19 @@ class Processor:
             W_FAS, B = build_lut_for_target(rir, L=self.L)
             self.lut[float(angle)] = (W_FAS, B)
 
-            # VAD statistieken (per beam) ENKEL VOOR TEST
-            self.vad_evals = 0
-            self.vad_update_count_left = 0
-            self.vad_update_count_right = 0
-            #EINDE TEST
+        #voor vad
+        self.noise_floor_left = None
+        self.noise_floor_right = None
+        self.alpha_up = 0.95     # langzaam stijgen (noise floor groeit voorzichtig)
+        self.alpha_down = 0.8    # snel dalen (snel reageren op stilte) eerst 0.5
+        self.vad_threshold = 0.5 # spraak = × noise floor
+
+        # VAD statistieken (per beam) ENKEL VOOR TEST
+        self.vad_evals = 0
+        self.vad_update_count_left = 0
+        self.vad_update_count_right = 0
+        #EINDE TEST
+ 
     def _get_lut_for_angle(self, doa):
         """Pakt dichtstbijzijnde hoek uit de LUT."""
         closest_angle = self.lut_angles[np.argmin(np.abs(self.lut_angles - doa))]
@@ -285,17 +293,33 @@ class Processor:
                 self.audio_buffer_gt1 = np.roll(self.audio_buffer_gt1, -self.hop, axis=0)
                 self.audio_buffer_gt1[-self.hop:, :] = hop_gt1
 
-            # VAD per spreker op clean speech (oracle VAD, zoals phase 1)
             if has_gt:
-                speech_left_chan = self.audio_buffer_gt0[-self.hop:, 0]
-                speech_right_chan = self.audio_buffer_gt1[-self.hop:, 0]
-                vad_left = np.any(np.abs(speech_left_chan) > np.std(speech_left_chan) * 0.1)
-                vad_right = np.any(np.abs(speech_right_chan) > np.std(speech_right_chan) * 0.1)
+                rms_left = np.sqrt(np.mean(self.audio_buffer_gt0[:, 0] ** 2))
+                rms_right = np.sqrt(np.mean(self.audio_buffer_gt1[:, 0] ** 2))
+    
+                # Initialiseer noise floor met eerste hop
+                if self.noise_floor_left is None:
+                    self.noise_floor_left = rms_left
+                    self.noise_floor_right = rms_right
+                else:
+                    # Asymmetrische EMA: snel naar beneden, langzaam omhoog
+                    # → noise floor "klikt vast" op stilte-energie
+                    if rms_left < self.noise_floor_left:
+                        self.noise_floor_left = self.alpha_down * self.noise_floor_left + (1 - self.alpha_down) * rms_left
+                    else:
+                        self.noise_floor_left = self.alpha_up * self.noise_floor_left + (1 - self.alpha_up) * rms_left
+            
+                    if rms_right < self.noise_floor_right:
+                        self.noise_floor_right = self.alpha_down * self.noise_floor_right + (1 - self.alpha_down) * rms_right
+                    else:
+                        self.noise_floor_right = self.alpha_up * self.noise_floor_right + (1 - self.alpha_up) * rms_right
+        
+                vad_left = rms_left > self.vad_threshold * self.noise_floor_left
+                vad_right = rms_right > self.vad_threshold * self.noise_floor_right
             else:
                 vad_left = False
                 vad_right = False
 
-            # NLMS update tijdens stilte van eigen target (target leakage vermijden)
             update_filter_left = not vad_left
             update_filter_right = not vad_right
         
@@ -306,7 +330,7 @@ class Processor:
             if update_filter_right:
                 self.vad_update_count_right += 1    
             #EINDE TEST
-            
+
             #  Analysis: window + FFT
             windowed = self.audio_buffer * self.window[:, np.newaxis]
             frame_fft = np.fft.rfft(windowed, n=self.L, axis=0)
@@ -482,12 +506,12 @@ class Processor:
         pred = self.aad_model([eeg_in, env1_in, env2_in], training=False) #gebruik model zelf als functie
         pred_prob = float(pred[0, 0])
         t4=time.time()
-        print(f"\n--- AAD Timing Breakdown ---")
-        print(f"EEG Preprocessing:   {(t1 - t0)*1000:.1f} ms")
-        print(f"Audio L Envelope:    {(t2 - t1)*1000:.1f} ms")
-        print(f"Audio R Envelope:    {(t3 - t2)*1000:.1f} ms")
-        print(f"Model Inference:     {(t4 - t3)*1000:.1f} ms")
-        print(f"TOTALE AAD TIJD:     {(t4 - t0)*1000:.1f} ms\n")
+        #print(f"\n--- AAD Timing Breakdown ---")
+        #print(f"EEG Preprocessing:   {(t1 - t0)*1000:.1f} ms")
+        #print(f"Audio L Envelope:    {(t2 - t1)*1000:.1f} ms")
+        #print(f"Audio R Envelope:    {(t3 - t2)*1000:.1f} ms")
+        #print(f"Model Inference:     {(t4 - t3)*1000:.1f} ms")
+        #print(f"TOTALE AAD TIJD:     {(t4 - t0)*1000:.1f} ms\n")
 
         # Direct gebruiken (geen smoothing voor nu)
         self.attended_left = round(pred_prob)

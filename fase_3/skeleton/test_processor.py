@@ -33,9 +33,13 @@ all_gt_l = []
 all_gt_r = []
 processing_times = []  # Lijstje voor de timer
 backlog_history = []
+sir_history = []
+sir_segment_history = []
+SEGMENT_DURATION_SEC = 10
+last_segment_print = 0
 current_backlog_ms = 0.0
 
-n_frames = 400  
+n_frames = 60*32  
 print(f"Verwerken van {n_frames} frames ({n_frames*chunk_size/fs:.1f}s audio)...\n")
 #begin aad toevoeging
 # --- DUMMY AAD DATA VOOR STRESS TEST ---
@@ -86,11 +90,24 @@ for i in range(n_frames):
         all_sig1.append(sig1)
         all_doa_l.append(angle_left)
         all_doa_r.append(angle_right)
-        
+        if sir != 0.0 and not np.isnan(sir):
+            sir_history.append(sir)
+            sir_segment_history.append(sir)
         mid_sample = i * chunk_size + chunk_size // 2
         if mid_sample < len(doa_left_gt):
             all_gt_l.append(doa_left_gt[mid_sample])
             all_gt_r.append(doa_right_gt[mid_sample])
+
+    current_time_sec = (i + 1) * chunk_size / fs
+    if current_time_sec - last_segment_print >= SEGMENT_DURATION_SEC:
+        if len(sir_segment_history) > 0:
+            print(f"\n[SIR {last_segment_print:.0f}-{current_time_sec:.0f}s] "
+                f"mean={np.mean(sir_segment_history):+.2f} dB | "
+                f"median={np.median(sir_segment_history):+.2f} dB | "
+                f"min={np.min(sir_segment_history):+.2f} | "
+                f"max={np.max(sir_segment_history):+.2f} (n={len(sir_segment_history)})")
+        sir_segment_history = []
+        last_segment_print = current_time_sec
 
 #  TIMING STATISTIEKEN 
 gemiddelde_tijd = np.mean(processing_times)
@@ -123,7 +140,16 @@ half = len(all_doa_l) // 2
 if half > 0 and half < len(all_gt_l):
     print(f"Gem. fout links:  {np.mean(np.abs(all_doa_l[half:] - all_gt_l[half:])):.2f}°")
     print(f"Gem. fout rechts: {np.mean(np.abs(all_doa_r[half:] - all_gt_r[half:])):.2f}°")
-
+print(f"\n===== SIR Statistieken (hele run) =====")
+if len(sir_history) > 0:
+    sir_arr = np.array(sir_history)
+    print(f"Gemiddelde SIR:      {np.mean(sir_arr):+.2f} dB")
+    print(f"Mediaan SIR:         {np.median(sir_arr):+.2f} dB")
+    print(f"Min / Max:           {np.min(sir_arr):+.2f} / {np.max(sir_arr):+.2f} dB")
+    print(f"Percentage > 0 dB:   {100 * np.mean(sir_arr > 0):.1f}%")
+    print(f"Percentage > +5 dB:  {100 * np.mean(sir_arr > 5):.1f}%")
+    half = len(sir_arr) // 2
+    print(f"Tweede helft mean:   {np.mean(sir_arr[half:]):+.2f} dB")
 print(f"\n===== Real-Time Buffer / Backlog Test =====")
 max_backlog = np.max(backlog_history)
 eind_backlog = backlog_history[-1]
