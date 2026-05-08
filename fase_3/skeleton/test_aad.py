@@ -1,9 +1,4 @@
 """
-AAD-only test: meet hoe goed het Phase 2 model presteert op streaming data.
-Geen GSC, geen MUSIC — alleen de AAD pipeline (EEG + clean stimuli → pred_prob).
-
-Gebruikt dezelfde label-mapping als issp_data.py (swap-logic), zodat de accuracy
-hier exact overeenkomt met wat de browser-visualisatie toont.
 
 Pair-1 mapping (uit issp_data.py):
     LEFT  speaker = audiobook_1_part2.wav

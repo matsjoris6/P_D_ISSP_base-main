@@ -191,7 +191,7 @@ class Processor:
         # AAD model laden (Phase 2 Dilated CNN, 5s window) 
         model_path = "models/generic_dilated_alle_proefpersonen_beste_pieter_3laag_5sec_VERVOLG.keras"
         self.aad_model = tf.keras.models.load_model(model_path)
-        self.aad_window_samples = 320   # 5s × 64Hz
+        self.aad_window_samples = 5*64   # 5s × 64Hz
         self.eeg_fs_in = 128            # raw EEG sample rate
         self.audio_fs_in = 48000        # raw audio sample rate 
 
@@ -493,25 +493,25 @@ class Processor:
 
         # Truncate naar exact aad_window_samples
         n = self.aad_window_samples
-        eeg_proc = eeg_proc[:n]
+        eeg_proc = eeg_proc[:n] #tegen afrondingseffecten bij resample
         env_left = env_left[:n]
         env_right = env_right[:n]
 
         # Naar model formaat
-        eeg_in = eeg_proc[np.newaxis, :, :].astype(np.float32)         # (1, 320, 64)
-        env1_in = env_left[np.newaxis, :, np.newaxis].astype(np.float32)
+        eeg_in = eeg_proc[np.newaxis, :, :].astype(np.float32)         # (1, 320, 64) want keras verwacht 3d tensor dus extra batch dimensie
+        env1_in = env_left[np.newaxis, :, np.newaxis].astype(np.float32) #(1,320,1 kanaal)
         env2_in = env_right[np.newaxis, :, np.newaxis].astype(np.float32)
 
         # Predictie
         pred = self.aad_model([eeg_in, env1_in, env2_in], training=False) #gebruik model zelf als functie
-        pred_prob = float(pred[0, 0])
+        pred_prob =1.0-float(pred[0, 0])
         t4=time.time()
-        #print(f"\n--- AAD Timing Breakdown ---")
-        #print(f"EEG Preprocessing:   {(t1 - t0)*1000:.1f} ms")
-        #print(f"Audio L Envelope:    {(t2 - t1)*1000:.1f} ms")
-        #print(f"Audio R Envelope:    {(t3 - t2)*1000:.1f} ms")
-        #print(f"Model Inference:     {(t4 - t3)*1000:.1f} ms")
-        #print(f"TOTALE AAD TIJD:     {(t4 - t0)*1000:.1f} ms\n")
+        print(f"\n--- AAD Timing Breakdown ---")
+        print(f"EEG Preprocessing:   {(t1 - t0)*1000:.1f} ms")
+        print(f"Audio L Envelope:    {(t2 - t1)*1000:.1f} ms")
+        print(f"Audio R Envelope:    {(t3 - t2)*1000:.1f} ms")
+        print(f"Model Inference:     {(t4 - t3)*1000:.1f} ms")
+        print(f"TOTALE AAD TIJD:     {(t4 - t0)*1000:.1f} ms\n")
 
         # Direct gebruiken (geen smoothing voor nu)
         self.attended_left = round(pred_prob)

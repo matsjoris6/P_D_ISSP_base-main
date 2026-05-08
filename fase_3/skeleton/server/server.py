@@ -93,7 +93,7 @@ if __name__ == "__main__":
     parser.add_argument("--stimuli_path", type=str, default="./data_test_convolved_1_with_switches/stimuli", help="Path to stimuli")
     parser.add_argument("--num_pairs", type=int, default=15, help="Number of pairs to load")
     parser.add_argument("--update_rate", type=int, default=32, help="Data chunks per second emitted to the processor")
-    parser.add_argument("--aad_window_size", type=int, default=3, help="Window length in seconds that is used for AAD processing")
+    parser.add_argument("--aad_window_size", type=int, default=5, help="Window length in seconds that is used for AAD processing")
     parser.add_argument("--eeg_fs", type=int, default=128, help="Sampling frequency of the EEG data")
     args = parser.parse_args()
 

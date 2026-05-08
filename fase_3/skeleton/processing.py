@@ -35,9 +35,12 @@ async def process_phase2():
     eeg = np.frombuffer(window["eeg"], dtype=np.float64).reshape(-1, 64)
     audio1 = np.frombuffer(window["audio1"], dtype=np.float32)
     audio2 = np.frombuffer(window["audio2"], dtype=np.float32)
+    #audio1 = np.frombuffer(window["audio1"], dtype=np.int16).astype(np.float32) / 32768.0
+    #audio2 = np.frombuffer(window["audio2"], dtype=np.int16).astype(np.float32) / 32768.0
 
     data_processor.processing_eeg_gt_audio(eeg, audio1, audio2) #asyncio wait to thread
-
+    # Offload de zware AAD-berekening naar een achtergrond-thread, 
+    #await asyncio.to_thread(data_processor.processing_eeg_gt_audio, eeg, audio1, audio2)
 
 async def send_processed_data_phase1():
     while not stop_event.is_set():
