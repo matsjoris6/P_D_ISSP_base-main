@@ -126,7 +126,7 @@ class ISSPData:
 
     def _cache_gt_audio(self, gt_audio_name):
         if gt_audio_name not in self.gt_audio_signals:
-            audio_fs, audio = wavfile.read(os.path.join(self.gt_audio_dir, gt_audio_name))
+            audio_fs, audio = wavfile.read(os.path.join(self.gt_audio_dir, gt_audio_name)) #uit stimuli
             self.gt_audio_signals[gt_audio_name] = audio_fs, audio
 #chuncks the data and yiels a chuck every time its being asked
     def generate_chunks(self, pair_no, subject_no):

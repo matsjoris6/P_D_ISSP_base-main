@@ -193,7 +193,7 @@ class Processor:
         self.aad_model = tf.keras.models.load_model(model_path)
         self.aad_window_samples = 320   # 5s × 64Hz
         self.eeg_fs_in = 128            # raw EEG sample rate
-        self.audio_fs_in = 16000        # raw audio sample rate (volgens README)
+        self.audio_fs_in = 48000        # raw audio sample rate 
 
         # PRE-COMPUTING: RIR Steering Vectors & GSC Filters
         rir_data = np.load(rir_path)
