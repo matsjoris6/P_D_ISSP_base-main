@@ -188,12 +188,20 @@ class Processor:
         self.last_angle_left = 135.0  
         self.last_angle_right = 45.0
 
-        # AAD model laden (Phase 2 Dilated CNN, 5s window) 
+        # AAD model laden (Phase 2 Dilated CNN, 5s window)
         model_path = "models/generic_dilated_alle_proefpersonen_beste_pieter_3laag_5sec_VERVOLG.keras"
         self.aad_model = tf.keras.models.load_model(model_path)
         self.aad_window_samples = 5*64   # 5s × 64Hz
         self.eeg_fs_in = 128            # raw EEG sample rate
-        self.audio_fs_in = 48000        # raw audio sample rate 
+        self.audio_fs_in = 48000        # raw audio sample rate
+
+       
+        # Beste filter uit test: EMA α=0.6 + Schmitt 0.60
+        self.ema_alpha = 0.6     # Stel in op 1 voor geen EMA, 0.6 voor sterke EMA
+        self.ema_filtered = 0.5  # Niet aanpassen
+        self.schmitt_threshold = 0.6  # 0.5 voor normale wissel, 0.6 voor beste waarde uit testen
+        self.schmitt_hysteresis = 0.05 # 0.00 voor geen filter, 0.05 voor beste waarde uit testen (5% hysterese)
+        self.schmitt_state = 0  
 
         # PRE-COMPUTING: RIR Steering Vectors & GSC Filters
         rir_data = np.load(rir_path)
@@ -513,7 +521,16 @@ class Processor:
         print(f"Model Inference:     {(t4 - t3)*1000:.1f} ms")
         print(f"TOTALE AAD TIJD:     {(t4 - t0)*1000:.1f} ms\n")
 
-        # Direct gebruiken (geen smoothing voor nu)
-        self.attended_left = round(pred_prob)
+        # Beste filter uit test: EMA α=0.6 + Schmitt 0.60
+        self.ema_filtered = self.ema_alpha * pred_prob + (1 - self.ema_alpha) * self.ema_filtered
 
-        self.data_queue_phase2.put_nowait(pred_prob)
+        # Schmitt trigger (hysteresis prevents flickering)
+        if self.schmitt_state == 0 and self.ema_filtered >= self.schmitt_threshold + self.schmitt_hysteresis:
+            self.schmitt_state = 1
+        elif self.schmitt_state == 1 and self.ema_filtered <= self.schmitt_threshold - self.schmitt_hysteresis:
+            self.schmitt_state = 0
+
+        # Update attended_left: server convention 0=left, 1=right
+        self.attended_left = (self.schmitt_state == 0)
+
+        return pred_prob
