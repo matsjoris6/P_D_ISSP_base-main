@@ -200,6 +200,10 @@ class Processor:
         self.beamformer_buffer_right = np.zeros(self.beamformer_buffer_max_samples, dtype=np.float32)
         self.beamformer_buffer_filled = 0  # hoeveel samples zijn al geschreven (tot max)
 
+        # AAD EMA Filter parameters
+        self.ema_alpha = 0.3
+        self.ema_filtered = 0.5  # Start op 50% (volledige twijfel)
+
         # PRE-COMPUTING: RIR Steering Vectors & GSC Filters
         rir_data = np.load(rir_path)
         rirs = rir_data["rirs"]   
@@ -543,7 +547,11 @@ class Processor:
         print(f"Model Inference:     {(t4 - t3)*1000:.1f} ms")
         print(f"TOTALE AAD TIJD:     {(t4 - t0)*1000:.1f} ms\n")
 
-        # Direct gebruiken (geen smoothing voor nu)
-        self.attended_left = round(pred_prob)
+        #  EMA Filter toepassen (mengt de nieuwe voorspelling met de historie)
+        self.ema_filtered = (self.ema_alpha * pred_prob) + ((1.0 - self.ema_alpha) * self.ema_filtered)
 
-        self.data_queue_phase2.put_nowait(pred_prob)
+        #  Beslissing baseren op de gefilterde (stabielere) kans
+        self.attended_left = round(self.ema_filtered)
+
+        #  Stuur de gefilterde kans naar de frontend voor een vloeiendere grafiek
+        self.data_queue_phase2.put_nowait(self.ema_filtered)

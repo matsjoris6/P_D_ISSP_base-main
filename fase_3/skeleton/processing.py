@@ -2,12 +2,17 @@ import argparse
 import asyncio
 import socketio
 import numpy as np
-
+from collections import deque
 from processor import Processor
 
 WINDOW_SIZE_SECONDS = 5  # Adjust your window size.
 UPDATE_RATE = 32  # Corresponding to the server's update rate.
+HOP_SIZE_SECONDS = 1
+WIN_CHUNKS = WINDOW_SIZE_SECONDS * UPDATE_RATE  # 160 chunks voor een vol venster
+HOP_CHUNKS = HOP_SIZE_SECONDS * UPDATE_RATE     # 32 chunks wachten voor de volgende update
 
+aad_buffer = deque(maxlen=WIN_CHUNKS)
+aad_hop_counter = 0
 sio = socketio.AsyncClient()
 stop_event = asyncio.Event()
 
@@ -30,18 +35,18 @@ async def process_phase1(data):
 
 
 async def process_phase2():
+    # Bouw het 5-seconde venster op uit de huidige stand van de rolling buffer
     window = {key: b"" for key in ["eeg", "audio1", "audio2"]}
-    for _ in range(WINDOW_SIZE_SECONDS * UPDATE_RATE):
-        data = await data_queue.get()
+    for chunk in aad_buffer:
         for key in window:
-            window[key] += data[key]
+            window[key] += chunk[key]
 
     eeg = np.frombuffer(window["eeg"], dtype=np.float64).reshape(-1, 64)
     audio1 = np.frombuffer(window["audio1"], dtype=np.float32)
     audio2 = np.frombuffer(window["audio2"], dtype=np.float32)
 
-    #await asyncio.to_thread(data_processor.processing_eeg_gt_audio, eeg, audio1, audio2)
-    data_processor.processing_eeg_gt_audio(eeg, audio1, audio2) #asyncio wait to thread
+    await asyncio.to_thread(data_processor.processing_eeg_gt_audio, eeg, audio1, audio2)
+    #data_processor.processing_eeg_gt_audio(eeg, audio1, audio2) #asyncio wait to thread
 
    # 1. Stuur de zware taak naar de achtergrond en WACHT op het antwoord (return pred_prob)
     #berekende_prob = await asyncio.to_thread(data_processor.processing_eeg_gt_audio, eeg, audio1, audio2)
@@ -105,11 +110,18 @@ async def disconnect():
 
 @sio.on("data_event", namespace="/worker")
 async def on_data(data):
-    # Data arrives here! Do whatever you want.
-    await data_queue.put(data)
+    global aad_hop_counter
+    
+    # 1. Microfoons direct verwerken (GSC beamformer blijft real-time)
     await process_phase1(data)
 
-    if data_queue.qsize() >= WINDOW_SIZE_SECONDS * UPDATE_RATE:
+    # 2. AAD Data verzamelen in de rolling buffer
+    aad_buffer.append(data)
+    aad_hop_counter += 1
+
+    # 3. Bereken AAD als het 5s-venster vol is, én we weer 1 seconde (32 hops) verder zijn
+    if len(aad_buffer) == WIN_CHUNKS and aad_hop_counter >= HOP_CHUNKS:
+        aad_hop_counter = 0  # Reset de hop teller
         await process_phase2()
 
 
