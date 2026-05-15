@@ -56,34 +56,38 @@ class Emitter:
         await sio.emit("gsc_data", data, namespace="/frontend")
 
     async def handle_intermediate_result2(self, sio, data):
-        # Omdat we een Sliding Window gebruiken met een hop van 1 seconde,
-        # staat elke nieuwe update gelijk aan 1 seconde voortgang in de tijd (niet 5).
         HOP_SIZE = 1 
-        # FIX: Als dit de allereerste AAD update is, gooi dan de eerste 4 seconden 
-        # aan Ground Truth weg. Hierdoor beoordelen we de HUIDIGE seconde.
-        if self.phase2_tick == self.aad_window_size - HOP_SIZE:
-            aanloop_samples = self.eeg_fs * (self.aad_window_size - HOP_SIZE)
-            del self.attended_speaker[:aanloop_samples]
-        num_mini_ticks = X_SCALE_FS * HOP_SIZE
-        num_labels = self.eeg_fs * HOP_SIZE
 
-        # Bereken de timestamps voor de X-as
-        data["timestamps"] = [(self.phase2_tick * num_mini_ticks) + (i * num_mini_ticks / num_labels) for i in range(num_labels)]
-        self.phase2_tick += 1
+        # DE ABSOLUTE MASTER KLOK: We kijken hoe ver de audio (phase1) al is!
+        current_time_sec = self.phase1_tick / self.update_rate
+        start_time_sec = current_time_sec - HOP_SIZE
 
-        # Haal exact 1 seconde aan ground truth data op om te vergelijken
-        num_samples_window = self.eeg_fs * HOP_SIZE
-        data["attended_speaker"] = self.attended_speaker[:num_samples_window]
-        del self.attended_speaker[:num_samples_window]
-        num_samples_window = min(num_samples_window, len(data["attended_speaker"]))
+        # Beveiliging voor de allereerste window
+        if start_time_sec < 0:
+            start_time_sec = 0
 
-        # Bereken de accuracy
+        num_mini_ticks = X_SCALE_FS * HOP_SIZE 
+        num_labels = self.eeg_fs * HOP_SIZE    
+
+        # 1. Teken de AAD-grafiek EXACT op de huidige audiotijd!
+        base_timestamp = start_time_sec * X_SCALE_FS
+        data["timestamps"] = [base_timestamp + (i * num_mini_ticks / num_labels) for i in range(num_labels)]
+
+        # 2. Haal de bijbehorende Ground Truth op basis van absolute tijd 
+        # (We gooien de lijst niet meer leeg met 'del', we pakken gewoon het juiste stukje)
+        start_idx = int(start_time_sec * self.eeg_fs)
+        end_idx = int(current_time_sec * self.eeg_fs)
+        
+        data["attended_speaker"] = self.attended_speaker[start_idx:end_idx]
+
+        # 3. Accuracy berekenen
+        num_samples_window = len(data["attended_speaker"])
         correct_samples_window = sum(1 for i in range(num_samples_window) if data["attended_speaker"][i] == round(data["pred_prob"]))
-        self.total += num_samples_window
-        self.correct_total += correct_samples_window
-
-        # Voorkom delen door nul als het einde bereikt is
+        
+        # Voeg alleen toe aan het totaal als we daadwerkelijk data hebben
         if num_samples_window > 0:
+            self.total += num_samples_window
+            self.correct_total += correct_samples_window
             data["accuracy"] = correct_samples_window / num_samples_window
         else:
             data["accuracy"] = 0
