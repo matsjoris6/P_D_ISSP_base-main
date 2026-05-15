@@ -8,18 +8,23 @@ Score: side-accuracy = % van de hops dat geschatte linker hoek > 90° EN
 Rapporteert de beste filter over alle pairs.
 """
 
+# Beste filter: Mediaan N=63 , EN EENVOUDIGST
+
 import sys
 import os
 import numpy as np
 import scipy.linalg
 from scipy import signal
 from scipy.io import wavfile
-from scipy.ndimage import median_filter
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-DATA_ROOT  = "data/phase3_audioData/audiodata_batch_1/reverberant"
+# Zorg dat we vanuit deze directory werken, ongeacht waar het script gerund wordt
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
+from config import SCENARIO, RIR_PATH as _LUT_NPZ_PATH
+DATA_ROOT  = f"data/phase3_audioData/audiodata_batch_1/{SCENARIO}"
 NUM_PAIRS  = 15
 FS         = 16000
 L          = 1024
@@ -28,7 +33,7 @@ BETA       = 0.85
 Q          = 2            # aantal sprekers
 PEAK_THRESHOLD = -12.0    # dB drempel voor geldige DOA-piek
 
-TIE_THRESHOLD_PCT = 1.0   # gelijkspeldrempel voor ranking
+TIE_THRESHOLD_DEG = 1.0   # gelijkspeldrempel voor ranking (in graden MAE)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -120,45 +125,146 @@ def ema_filter(seq, alpha):
     return out
 
 
+def causal_median_filter(seq, N):
+    """
+    Causaal mediaan filter: enkel de laatste N waarden (geen toekomst).
+    """
+    out = np.empty(len(seq), dtype=float)
+    for i in range(len(seq)):
+        out[i] = np.median(seq[max(0, i - N + 1):i + 1])
+    return out
+
+
+def causal_mode_filter(seq, N):
+    """
+    Causaal modus-filter op de (discrete) LUT-hoeken.
+    Kiest de meest voorkomende waarde in het venster — robuuster dan mediaan
+    als uitschieters op dezelfde foute hoek clusteren.
+    """
+    out = np.empty(len(seq), dtype=float)
+    for i in range(len(seq)):
+        window = seq[max(0, i - N + 1):i + 1]
+        vals, counts = np.unique(window, return_counts=True)
+        out[i] = vals[np.argmax(counts)]
+    return out
+
+
+def causal_percentile_filter(seq_l, seq_r, N, pct_l=75, pct_r=25):
+    """
+    Directional percentiel-filter:
+      • Linkse spreker (hoek > 90°): gebruik pct_l-de percentiel → bias naar hogere hoek.
+      • Rechtse spreker (hoek < 90°): gebruik pct_r-de percentiel → bias naar lagere hoek.
+    Hierdoor worden uitschieters naar de verkeerde kant extra onderdrukt.
+    """
+    out_l = np.empty(len(seq_l), dtype=float)
+    out_r = np.empty(len(seq_r), dtype=float)
+    for i in range(len(seq_l)):
+        wl = seq_l[max(0, i - N + 1):i + 1]
+        wr = seq_r[max(0, i - N + 1):i + 1]
+        out_l[i] = np.percentile(wl, pct_l)
+        out_r[i] = np.percentile(wr, pct_r)
+    return out_l, out_r
+
+
 def apply_strategy(raw_l, raw_r, name):
     if name == "Raw":
         return raw_l.copy(), raw_r.copy()
     if name.startswith("Mediaan"):
         N = int(name.split("N=")[1])
-        return median_filter(raw_l, size=N, mode="nearest"), \
-               median_filter(raw_r, size=N, mode="nearest")
-    if name.startswith("EMA"):
+        return causal_median_filter(raw_l, N), causal_median_filter(raw_r, N)
+    if name.startswith("EMA α="):
         a = float(name.split("α=")[1])
         return ema_filter(raw_l, a), ema_filter(raw_r, a)
-    raise ValueError(name)
+    if name.startswith("Mode"):
+        N = int(name.split("N=")[1])
+        return causal_mode_filter(raw_l, N), causal_mode_filter(raw_r, N)
+    if name.startswith("Med") and "+EMA" in name:
+        # bijv. "Med31+EMA0.30"
+        parts = name.replace("Med", "").split("+EMA")
+        N, a  = int(parts[0]), float(parts[1])
+        ml    = causal_median_filter(raw_l, N)
+        mr    = causal_median_filter(raw_r, N)
+        return ema_filter(ml, a), ema_filter(mr, a)
+    if name.startswith("Pct"):
+        # bijv. "Pct75/25 N=63"  → pct_l=75, pct_r=25
+        pct_part, n_part = name.split(" N=")
+        pcts = pct_part.replace("Pct", "").split("/")
+        pct_l, pct_r = int(pcts[0]), int(pcts[1])
+        N = int(n_part)
+        return causal_percentile_filter(raw_l, raw_r, N, pct_l, pct_r)
+    raise ValueError(f"Onbekende strategie: {name}")
 
 
 STRATEGIES = [
+    # ── Baseline ────────────────────────────────────────────────
     "Raw",
+
+    # ── Causaal mediaan-filter ───────────────────────────────────
+    # N = venstergrootte in hops  (1 hop = 32 ms @ 16kHz/512)
     "Mediaan N=3",
     "Mediaan N=7",
     "Mediaan N=15",
     "Mediaan N=31",
-    "Mediaan N=63",
-    "EMA α=0.2",
-    "EMA α=0.4",
-    "EMA α=0.6",
-    "EMA α=0.8",
+    "Mediaan N=63",    # huidig beste
+    "Mediaan N=127",   # 2× huidig beste
+    "Mediaan N=255",   # 4× huidig beste
+    "Mediaan N=511",   # 8× huidig beste  (~16 s aanlooptijd)
+
+    # ── EMA ─────────────────────────────────────────────────────
+    # Kleine α = traag/stabiel, grote α = snel/reactief
+    "EMA α=0.05",
+    "EMA α=0.10",
+    "EMA α=0.20",
+    "EMA α=0.30",
+    "EMA α=0.40",
+    "EMA α=0.60",
+    "EMA α=0.80",
+
+    # ── Mode (modus) op discrete LUT-hoeken ─────────────────────
+    # Kiest de meest-voorkomende hoek in het venster.
+    # Beter dan mediaan als uitschieters altijd op dezelfde foute hoek vallen.
+    "Mode N=31",
+    "Mode N=63",
+    "Mode N=127",
+    "Mode N=255",
+
+    # ── Cascaded: Mediaan → EMA ──────────────────────────────────
+    # Mediaan verwijdert uitschieters; daarna EMA voor extra gladheid.
+    "Med31+EMA0.30",
+    "Med63+EMA0.20",
+    "Med63+EMA0.30",
+    "Med127+EMA0.20",
+
+    # ── Directional percentiel-filter ───────────────────────────
+    # Linker spreker (>90°): pak hoge percentiel → bias naar grotere hoek.
+    # Rechter spreker (<90°): pak lage percentiel → bias naar kleinere hoek.
+    # Onderdrukt uitschieters die naar de verkeerde kant springen.
+    "Pct75/25 N=31",
+    "Pct75/25 N=63",
+    "Pct75/25 N=127",
+    "Pct80/20 N=63",
+    "Pct80/20 N=127",
 ]
 
 
-def side_accuracy(el, er):
-    """% van de hops dat geschatte linker hoek > 90° EN rechter hoek ≤ 90°."""
-    return np.mean((el > 90.0) & (er <= 90.0)) * 100
+def angle_mae(el, er, gt_l, gt_r):
+    """
+    Gemiddelde absolute fout (MAE) in graden tussen geschatte en werkelijke hoeken.
+    Combineert links én rechts: lagere waarde = betere filter.
+    """
+    n = min(len(el), len(gt_l), len(er), len(gt_r))
+    mae_l = np.mean(np.abs(el[:n] - gt_l[:n]))
+    mae_r = np.mean(np.abs(er[:n] - gt_r[:n]))
+    return (mae_l + mae_r) / 2.0
 
 
 # ── hoofd ─────────────────────────────────────────────────────────────────────
 
 def main():
-    lut_npz  = os.path.join(DATA_ROOT, "lma_16kHz_200ms.npz")
+    lut_npz  = _LUT_NPZ_PATH   # uit config.py — zelfde RIR als processor.py
     A_lut, lut_angles = build_music_lut(lut_npz, L)
 
-    pair_results = []  # lijst van (pair_no, {strategy: acc})
+    pair_results = []  # lijst van (pair_no, {strategy: mae})
 
     for pair_no in range(1, NUM_PAIRS + 1):
         pair_dir = os.path.join(DATA_ROOT, f"pair{pair_no}")
@@ -178,22 +284,22 @@ def main():
 
         gt_l, gt_r = gt_to_hops(gt_path, n_hops)
 
-        accs = {}
+        maes = {}
         best_name = None
-        best_acc  = -1
+        best_mae  = np.inf
         for name in STRATEGIES:
-            el, er    = apply_strategy(raw_l, raw_r, name)
-            acc       = side_accuracy(el, er)
-            accs[name] = acc
+            el, er  = apply_strategy(raw_l, raw_r, name)
+            mae     = angle_mae(el, er, gt_l, gt_r)
+            maes[name] = mae
             marker = ""
-            if acc > best_acc:
-                best_acc  = acc
+            if mae < best_mae:
+                best_mae  = mae
                 best_name = name
                 marker = "  ←"
-            print(f"  {name:20s}  acc={acc:.1f}%{marker}")
+            print(f"  {name:20s}  MAE={mae:5.1f}°{marker}")
 
-        pair_results.append((pair_no, accs))
-        print(f"  → best voor paar {pair_no}: {best_name}  ({best_acc:.1f}%)")
+        pair_results.append((pair_no, maes))
+        print(f"  → best voor paar {pair_no}: {best_name}  (MAE={best_mae:.1f}°)")
 
     # ── aggregaat ──────────────────────────────────────────────────────────────
     if not pair_results:
@@ -201,58 +307,63 @@ def main():
         return
 
     print("\n" + "=" * 60)
-    print("TOTAALOVERZICHT")
+    print("TOTAALOVERZICHT  (lager MAE = beter)")
     print("=" * 60)
-    print(f"{'Strategie':<22}  {'Gem.acc':>8}  {'Med.acc':>8}")
-    print("-" * 42)
+    print(f"{'Strategie':<22}  {'Gem.MAE':>9}  {'Med.MAE':>9}")
+    print("-" * 44)
 
     summary = {}
     for name in STRATEGIES:
         vals = [r[name] for _, r in pair_results]
         summary[name] = {"mean": np.mean(vals), "median": np.median(vals), "vals": vals}
 
-    sorted_strats = sorted(summary.items(), key=lambda x: (-x[1]["mean"], -x[1]["median"]))
+    # Laagste gemiddelde MAE wint; mediaan als tiebreak
+    sorted_strats = sorted(summary.items(), key=lambda x: (x[1]["mean"], x[1]["median"]))
 
     for name, s in sorted_strats:
-        print(f"  {name:<20}  {s['mean']:>7.1f}%  {s['median']:>7.1f}%")
+        print(f"  {name:<20}  {s['mean']:>8.1f}°  {s['median']:>8.1f}°")
 
-    # Winnaar: hoogste gemiddelde, mediaan als tiebreak
+    # Winnaar: laagste gemiddelde, mediaan als tiebreak
     winner_name, winner_s = sorted_strats[0]
     runner_name, runner_s = sorted_strats[1]
-    gap = winner_s["mean"] - runner_s["mean"]
+    gap = runner_s["mean"] - winner_s["mean"]
 
-    if gap <= TIE_THRESHOLD_PCT:
+    if gap <= TIE_THRESHOLD_DEG:
         # gelijkspel → kies op mediaan
-        if runner_s["median"] > winner_s["median"]:
+        if runner_s["median"] < winner_s["median"]:
             winner_name, winner_s = runner_name, runner_s
 
     print("\n" + "=" * 60)
     print(f"  EINDWINNAAR: '{winner_name}'")
-    print(f"  Gemiddelde side-accuracy : {winner_s['mean']:.1f}%")
-    print(f"  Mediaan side-accuracy    : {winner_s['median']:.1f}%")
+    print(f"  Gemiddelde MAE : {winner_s['mean']:.1f}°")
+    print(f"  Mediaan MAE    : {winner_s['median']:.1f}°")
     print("=" * 60)
 
-    # ── plot ──────────────────────────────────────────────────────────────────
-    means   = [summary[n]["mean"]   for n in STRATEGIES]
-    medians = [summary[n]["median"] for n in STRATEGIES]
-    x       = np.arange(len(STRATEGIES))
+    # ── plot (horizontale barplot — overzichtelijker bij veel strategieën) ────
+    # Sorteer op gemiddelde MAE voor leesbaarheid
+    sorted_names  = [n for n, _ in sorted_strats]
+    sorted_means  = [summary[n]["mean"]   for n in sorted_names]
+    sorted_meds   = [summary[n]["median"] for n in sorted_names]
 
-    fig, ax = plt.subplots(figsize=(12, 5))
-    bars = ax.bar(x - 0.2, means,   0.35, label="Gemiddeld", color="steelblue")
-    ax.bar(x + 0.2, medians, 0.35, label="Mediaan",   color="coral")
+    fig, ax = plt.subplots(figsize=(11, max(6, len(STRATEGIES) * 0.38)))
+    y = np.arange(len(sorted_names))
 
-    winner_idx = STRATEGIES.index(winner_name)
+    bars = ax.barh(y - 0.18, sorted_means, 0.32, label="Gemiddeld MAE", color="steelblue")
+    ax.barh(y + 0.18, sorted_meds,  0.32, label="Mediaan MAE",   color="coral", alpha=0.85)
+
+    winner_idx = sorted_names.index(winner_name)
     bars[winner_idx].set_color("gold")
     bars[winner_idx].set_edgecolor("black")
     bars[winner_idx].set_linewidth(1.5)
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(STRATEGIES, rotation=30, ha="right")
-    ax.set_ylabel("Side-accuracy (%)")
-    ax.set_title("DOA filter vergelijking — reverberant (side-accuracy)")
-    ax.legend()
-    ax.set_ylim(0, 105)
-    ax.axhline(summary["Raw"]["mean"], color="grey", linestyle="--", linewidth=0.8, label="Raw baseline")
+    ax.set_yticks(y)
+    ax.set_yticklabels(sorted_names, fontsize=8)
+    ax.invert_yaxis()   # beste bovenaan
+    ax.set_xlabel("Hoekfout MAE (°)")
+    ax.set_title("DOA filter vergelijking — reverberant (MAE t.o.v. ground truth)\n"
+                 f"Winnaar: {winner_name}  (gem. {winner_s['mean']:.1f}°)")
+    ax.axvline(summary["Raw"]["mean"], color="grey", linestyle="--", linewidth=0.8, label="Raw baseline")
+    ax.legend(fontsize=8)
     plt.tight_layout()
     out = "doa_filter_vergelijking.png"
     plt.savefig(out, dpi=150)

@@ -27,6 +27,7 @@ function connectToServer() {
         console.log('Connection closed');
     });
 
+
     socket.on('gsc_data', async (data) => {
         let timestamps = data['timestamps'];
         let gsc0 = data['gsc_left'];

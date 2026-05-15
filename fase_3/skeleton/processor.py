@@ -1,7 +1,9 @@
 import asyncio
+import os
 import numpy as np
 import scipy.linalg
 from scipy import signal
+from collections import deque
 import logging
 logging.getLogger('brian2').setLevel(logging.ERROR)
 import brian2
@@ -38,7 +40,7 @@ _LMA_COORDS = np.array([
 
 
 
-_RIR_PATH = "data/phase3_audioData/audiodata_batch_1/anechoic/lma_16kHz.npz"
+from config import RIR_PATH as _RIR_PATH   # anechoic of reverberant, bepaald door SCENARIO in config.py
 def build_lut_for_target(target_rir, L=1024):
     """Bouwt FAS beamformer en Blocking matrix voor één RIR."""
     n_bins = L // 2 + 1
@@ -84,7 +86,9 @@ class EnvelopeFromGammatoneFilterbank(Filterbank):
 
 
 def compute_audio_envelope(audio_data, sr_in, sr_out=64, lowcut=1.0, highcut=32.0):
-    
+    # Reset Brian2's global object registry zodat herhaalde aanroepen
+    # geen conflicterende NeuronGroup/Network-objecten ophopen.
+    brian2.start_scope()
     sound = Sound(audio_data.reshape(-1, 1), samplerate=sr_in * Hz)
     cf = erbspace(50 * Hz, 5 * kHz, 28)
     gammatone_filterbank = Gammatone(sound, cf)
@@ -188,20 +192,56 @@ class Processor:
         self.last_angle_left = 135.0  
         self.last_angle_right = 45.0
 
-        # AAD model laden (Phase 2 Dilated CNN, 5s window)
-        model_path = "models/generic_dilated_alle_proefpersonen_beste_pieter_3laag_5sec_VERVOLG.keras"
-        self.aad_model = tf.keras.models.load_model(model_path)
-        self.aad_window_samples = 5*64   # 5s × 64Hz
-        self.eeg_fs_in = 128            # raw EEG sample rate
-        self.audio_fs_in = 48000        # raw audio sample rate
+        # AAD model laden — instellingen komen uit config.py (ACTIVE_MODEL)
+        from config import MODEL_PATH, EEG_WINDOW_SAMPLES, EMA_ALPHA, SCHMITT_THRESHOLD, SCHMITT_HYSTERESIS, ACTIVE_MODEL, USE_GSC_AUDIO_FOR_AAD
+        print(f"[INFO] AAD model: {ACTIVE_MODEL}  ({MODEL_PATH})")
+        self.aad_model = tf.keras.models.load_model(MODEL_PATH)
+        self.aad_window_samples = EEG_WINDOW_SAMPLES  # bijv. 320 (5s) of 640 (10s)
+        self.eeg_fs_in   = 128    # raw EEG sample rate
+        self.audio_fs_in = 48000  # clean speech sample rate (stimuli)
 
-       
-        # Beste filter uit test: EMA α=0.6 + Schmitt 0.60
-        self.ema_alpha = 0.6     # Stel in op 1 voor geen EMA, 0.6 voor sterke EMA
-        self.ema_filtered = 0.5  # Niet aanpassen
-        self.schmitt_threshold = 0.6  # 0.5 voor normale wissel, 0.6 voor beste waarde uit testen
-        self.schmitt_hysteresis = 0.05 # 0.00 voor geen filter, 0.05 voor beste waarde uit testen (5% hysterese)
-        self.schmitt_state = 0  
+        # ── Audio-bron voor AAD ───────────────────────────────────────────────
+        # False: clean speech (stimuli, 48 kHz) — ideale omstandigheid, standaard.
+        # True : GSC-output (beamformer, 16 kHz) — realistisch, levert extra punten.
+        self.use_gsc_audio_for_aad = USE_GSC_AUDIO_FOR_AAD
+        if self.use_gsc_audio_for_aad:
+            print("[INFO] AAD audio-bron: GSC-output van de beamformer (16 kHz)")
+        else:
+            print("[INFO] AAD audio-bron: clean speech van de stimuli (48 kHz)")
+
+        # Rolling buffer voor GSC-audio (gevuld door processing_microarray).
+        # Bevat de laatste WINDOW_SEC seconden aan beamformer-output (@ self.fs = 16 kHz).
+        # Grootte: EEG_WINDOW_SAMPLES samples @ 64 Hz × (16000/64) = WINDOW_SEC × 16000.
+        _gsc_buf_len = EEG_WINDOW_SAMPLES * (self.fs // 64)   # bijv. 320 × 250 = 80 000
+        self._gsc_buf_left  = deque(maxlen=_gsc_buf_len)
+        self._gsc_buf_right = deque(maxlen=_gsc_buf_len)
+
+        # ── Filter toggles ────────────────────────────────────────────────────
+        # Zet op True voor reverb, False voor anechoisch (of om uit te zetten)
+        self.use_aad_filter = True    # EMA + Schmitt (parameters uit config.py)
+        self.use_doa_filter = True    # Causaal mediaan N=63 op DOA-schattingen
+        self.use_vad_filter = False   # Reverb-geoptimaliseerde VAD-parameters
+
+        # ── AAD filter: EMA + Schmitt trigger (uit config.py) ────────────────
+        self.ema_alpha          = EMA_ALPHA
+        self.ema_filtered       = 0.5              # interne staat, niet aanpassen
+        self.schmitt_threshold  = SCHMITT_THRESHOLD
+        self.schmitt_hysteresis = SCHMITT_HYSTERESIS
+        self.schmitt_state      = 0
+
+        # ── DOA filter: causaal op de MUSIC-schattingen ──────────────────────
+        # Kies filter type:  "median"  of  "ema"  of  "none"
+        # Beste uit test_doa_filter.py: "median" met N=63
+        self.doa_filter_type = "median"
+        self.doa_filter_N    = 63      # mediaan: 3, 7, 15, 31, 63, 127, 255
+        self.doa_ema_alpha   = 0.4     # ema: 0.2 (traag/stabiel) … 0.8 (snel/reactief)
+
+        # Ring-buffer voor mediaan filter
+        self.doa_buf_left  = deque(maxlen=self.doa_filter_N)
+        self.doa_buf_right = deque(maxlen=self.doa_filter_N)
+        # EMA-staat voor ema filter
+        self.doa_ema_left  = None
+        self.doa_ema_right = None
 
         # PRE-COMPUTING: RIR Steering Vectors & GSC Filters
         rir_data = np.load(rir_path)
@@ -230,23 +270,60 @@ class Processor:
             W_FAS, B = build_lut_for_target(rir, L=self.L)
             self.lut[float(angle)] = (W_FAS, B)
 
-        #voor vad
-        self.noise_floor_left = None
+        # ── VAD parameters ───────────────────────────────────────────────────
+        # Beste waarden uit test_vad.py voor reverb:
+        #   alpha_up=0.99, alpha_down=0.9, vad_threshold=0.5
+        # Anechoisch (snellere reactie, minder conservatief):
+        #   alpha_up=0.95, alpha_down=0.8, vad_threshold=0.5
+        self.noise_floor_left  = None
         self.noise_floor_right = None
-        self.alpha_up = 0.95     # langzaam stijgen (noise floor groeit voorzichtig)
-        self.alpha_down = 0.8    # snel dalen (snel reageren op stilte) eerst 0.5
-        self.vad_threshold = 0.5 # spraak = × noise floor
+        self.vad_threshold     = 0.5
+        if self.use_vad_filter:   # reverb-geoptimaliseerd
+            self.alpha_up   = 0.99
+            self.alpha_down = 0.9
+        else:                     # anechoisch
+            self.alpha_up   = 0.95
+            self.alpha_down = 0.8
 
-        # VAD statistieken (per beam) ENKEL VOOR TEST
-        self.vad_evals = 0
-        self.vad_update_count_left = 0
-        self.vad_update_count_right = 0
-        #EINDE TEST
+        # ── Statistieken voor eindrapport ─────────────────────────────────────
+        self._stat_doa_left_raw      = []   # ruwe MUSIC-schatting links (per hop)
+        self._stat_doa_right_raw     = []   # ruwe MUSIC-schatting rechts (per hop)
+        self._stat_doa_left_filt     = []   # na DOA-filter links (per hop)
+        self._stat_doa_right_filt    = []   # na DOA-filter rechts (per hop)
+        self._stat_vad_left          = []   # VAD-beslissing links (True=spraak, per hop)
+        self._stat_vad_right         = []   # VAD-beslissing rechts (True=spraak, per hop)
+        self._stat_sir_left          = []   # SIR links per 1s-venster
+        self._stat_sir_right         = []   # SIR rechts per 1s-venster
+        self._stat_aad_raw_decisions = []   # ruwe modelkans: 0=L/1=R (hoge pred_prob = RIGHT)
+        self._stat_aad_filt_decisions= []   # na AAD-filter (EMA+Schmitt) → 0=L/1=R
+        self._stat_aad_gt_labels     = []   # GT attended speaker per venster (0=L, 1=R)
+        self._stat_aad_times_ms      = []   # verwerkingstijd AAD in ms
+        self._doa_gt_raw             = None # ruwe gt.npz data voor MAE-berekening (optioneel)
+        self._aad_hop_seconds        = 5    # stap tussen opeenvolgende inferenties (ingesteld door processing.py)
  
     def _get_lut_for_angle(self, doa):
         """Pakt dichtstbijzijnde hoek uit de LUT."""
         closest_angle = self.lut_angles[np.argmin(np.abs(self.lut_angles - doa))]
         return self.lut[float(closest_angle)]
+
+    def set_doa_gt_raw(self, gt_npz_path):
+        """
+        Laad ruwe DOA ground truth uit gt.npz voor MAE-berekening in eindstatistiek.
+        Wordt aangeroepen vanuit processing.py na verbinding met server.
+        """
+        if os.path.exists(gt_npz_path):
+            self._doa_gt_raw = np.load(gt_npz_path)
+            print(f"[INFO] DOA ground truth geladen: {gt_npz_path}")
+        else:
+            print(f"[WARN] DOA ground truth niet gevonden: {gt_npz_path} (MAE niet beschikbaar)")
+
+    def record_aad_gt(self, window_gt):
+        """
+        Sla de ground truth op voor het zojuist verwerkte AAD-venster.
+        window_gt : 0.0 = links geattendeerd, 1.0 = rechts geattendeerd.
+        Wordt aangeroepen vanuit processing.py na processing_eeg_gt_audio().
+        """
+        self._stat_aad_gt_labels.append(float(window_gt))
     
     def _apply_gsc_frame(self, frame_fft, W_FAS, B, w_nlms, update_filter):
         """
@@ -330,14 +407,6 @@ class Processor:
 
             update_filter_left = not vad_left
             update_filter_right = not vad_right
-        
-            # Statistieken bijhouden BEGIN TEST
-            self.vad_evals += 1
-            if update_filter_left:
-                self.vad_update_count_left += 1
-            if update_filter_right:
-                self.vad_update_count_right += 1    
-            #EINDE TEST
 
             #  Analysis: window + FFT
             windowed = self.audio_buffer * self.window[:, np.newaxis]
@@ -382,8 +451,37 @@ class Processor:
             if spectrum_geom_db[best_right_idx] > PEAK_THRESHOLD:
                 self.last_angle_right = self.lut_angles[best_right_idx]
 
-            angle_left = self.last_angle_left
-            angle_right = self.last_angle_right
+            # ── DOA filter ───────────────────────────────────────────────────
+            # Stel in via: self.use_doa_filter, self.doa_filter_type, self.doa_filter_N / self.doa_ema_alpha
+            # "median" N=63 : causaal venster van 63 hops — verwijdert uitschieters, robuust tegen reverb
+            # "ema"   α=0.4 : exponentieel gemiddelde — geen aanlooptijd, maar reageert trager op echte hoekwijzigingen
+            # "none"        : ruwe MUSIC met last-valid fallback — snel, maar onstabiel bij reverb
+            raw_l = self.last_angle_left
+            raw_r = self.last_angle_right
+
+            if self.use_doa_filter and self.doa_filter_type == "median":
+                self.doa_buf_left.append(raw_l)
+                self.doa_buf_right.append(raw_r)
+                angle_left  = float(np.median(self.doa_buf_left))
+                angle_right = float(np.median(self.doa_buf_right))
+            elif self.use_doa_filter and self.doa_filter_type == "ema":
+                if self.doa_ema_left is None:
+                    self.doa_ema_left, self.doa_ema_right = raw_l, raw_r
+                self.doa_ema_left  = self.doa_ema_alpha * raw_l + (1 - self.doa_ema_alpha) * self.doa_ema_left
+                self.doa_ema_right = self.doa_ema_alpha * raw_r + (1 - self.doa_ema_alpha) * self.doa_ema_right
+                angle_left  = self.doa_ema_left
+                angle_right = self.doa_ema_right
+            else:
+                angle_left  = raw_l
+                angle_right = raw_r
+
+            # Statistieken bijhouden (per hop)
+            self._stat_doa_left_raw.append(raw_l)
+            self._stat_doa_right_raw.append(raw_r)
+            self._stat_doa_left_filt.append(angle_left)
+            self._stat_doa_right_filt.append(angle_right)
+            self._stat_vad_left.append(bool(vad_left) if has_gt else None)
+            self._stat_vad_right.append(bool(vad_right) if has_gt else None)
 
             # FD-GSC
             W_FAS_L, B_L = self._get_lut_for_angle(angle_left)
@@ -404,6 +502,12 @@ class Processor:
 
             self.ola_buffer_left = np.concatenate([self.ola_buffer_left[self.hop:], np.zeros(self.hop)])
             self.ola_buffer_right = np.concatenate([self.ola_buffer_right[self.hop:], np.zeros(self.hop)])
+
+            # Vul de GSC-audio rolling buffer (voor AAD als use_gsc_audio_for_aad=True).
+            # sig0_hop = linkerbeam, sig1_hop = rechterbeam — beide @ self.fs (16 kHz).
+            if self.use_gsc_audio_for_aad:
+                self._gsc_buf_left.extend(sig0_hop.astype(np.float32))
+                self._gsc_buf_right.extend(sig1_hop.astype(np.float32))
 
             # SIR berekening
             sir = self._last_sir
@@ -463,6 +567,8 @@ class Processor:
                     self._last_sir = sir
                     self._last_sir_left = sir_left if not np.isnan(sir_left) else 0.0
                     self._last_sir_right = sir_right if not np.isnan(sir_right) else 0.0
+                    self._stat_sir_left.append(self._last_sir_left)
+                    self._stat_sir_right.append(self._last_sir_right)
 
                     self.sir_buf_y_left = []
                     self.sir_buf_y_right = []
@@ -485,19 +591,40 @@ class Processor:
 
     def processing_eeg_gt_audio(self, eeg, sig_left_clean, sig_right_clean):
         """
-        eeg : (N_eeg, 64) at 128 Hz, ~5 seconden
-        sig_left_clean, sig_right_clean : (N_audio,) at 16000 Hz, ~5 seconden
+        eeg : (N_eeg, 64) at 128 Hz, ~WINDOW_SEC seconden
+        sig_left_clean, sig_right_clean : (N_audio,) at 48000 Hz — clean speech (stimuli).
+
+        Als use_gsc_audio_for_aad=True, worden sig_left_clean/sig_right_clean genegeerd
+        en wordt de GSC rolling buffer (_gsc_buf_left/_gsc_buf_right) gebruikt in plaats
+        daarvan. Die buffer bevat de laatste WINDOW_SEC seconden beamformer-output @ 16 kHz.
         """
         t0 = time.time()
-        # Preprocessing 
+        # Preprocessing EEG
         eeg_proc = preprocess_eeg(eeg, fs_in=self.eeg_fs_in, fs_out=64)
-        t1=time.time()
-        env_left = compute_audio_envelope(sig_left_clean.astype(np.float32),
-                                        sr_in=self.audio_fs_in, sr_out=64)
-        t2=time.time()
-        env_right = compute_audio_envelope(sig_right_clean.astype(np.float32),
-                                        sr_in=self.audio_fs_in, sr_out=64)
-        t3=time.time()
+        t1 = time.time()
+
+        # ── Audio-bron selectie ───────────────────────────────────────────────
+        if self.use_gsc_audio_for_aad and len(self._gsc_buf_left) == self._gsc_buf_left.maxlen:
+            # GSC-output: snapshot van de rolling buffer (@ self.fs = 16 kHz)
+            audio_left  = np.array(self._gsc_buf_left,  dtype=np.float32)
+            audio_right = np.array(self._gsc_buf_right, dtype=np.float32)
+            audio_fs    = self.fs          # 16 000 Hz
+
+            # DEBUG: swap GSC links/rechts om te testen of er een DOA-swap is.
+            # Aanzetten via --gsc_swap CLI of via processor.gsc_swap = True.
+            if getattr(self, "gsc_swap", False):
+                audio_left, audio_right = audio_right, audio_left
+        else:
+            # Clean speech van de stimuli (@ self.audio_fs_in = 48 kHz) — standaard.
+            # Ook als fallback als de GSC buffer nog niet vol is (eerste WINDOW_SEC).
+            audio_left  = sig_left_clean.astype(np.float32)
+            audio_right = sig_right_clean.astype(np.float32)
+            audio_fs    = self.audio_fs_in  # 48 000 Hz
+
+        env_left = compute_audio_envelope(audio_left,  sr_in=audio_fs, sr_out=64)
+        t2 = time.time()
+        env_right = compute_audio_envelope(audio_right, sr_in=audio_fs, sr_out=64)
+        t3 = time.time()
 
         # Truncate naar exact aad_window_samples
         n = self.aad_window_samples
@@ -514,23 +641,183 @@ class Processor:
         pred = self.aad_model([eeg_in, env1_in, env2_in], training=False) #gebruik model zelf als functie
         pred_prob =1.0-float(pred[0, 0])
         t4=time.time()
-        print(f"\n--- AAD Timing Breakdown ---")
-        print(f"EEG Preprocessing:   {(t1 - t0)*1000:.1f} ms")
-        print(f"Audio L Envelope:    {(t2 - t1)*1000:.1f} ms")
-        print(f"Audio R Envelope:    {(t3 - t2)*1000:.1f} ms")
-        print(f"Model Inference:     {(t4 - t3)*1000:.1f} ms")
-        print(f"TOTALE AAD TIJD:     {(t4 - t0)*1000:.1f} ms\n")
+        totaal_ms = (t4 - t0) * 1000
+        self._stat_aad_times_ms.append(totaal_ms)
 
-        # Beste filter uit test: EMA α=0.6 + Schmitt 0.60
-        self.ema_filtered = self.ema_alpha * pred_prob + (1 - self.ema_alpha) * self.ema_filtered
+        # Ruwe beslissing (voor filter): hoge pred_prob = RIGHT (1.0), lage = LEFT (0.0)
+        # Convention: pred_prob = 1 - model_output → hoog = model denkt RIGHT
+        # (zelfde als Schmitt trigger: ema_filtered >= 0.65 → state=1=RIGHT)
+        self._stat_aad_raw_decisions.append(0.0 if (pred_prob < 0.5) else 1.0)
 
-        # Schmitt trigger (hysteresis prevents flickering)
-        if self.schmitt_state == 0 and self.ema_filtered >= self.schmitt_threshold + self.schmitt_hysteresis:
-            self.schmitt_state = 1
-        elif self.schmitt_state == 1 and self.ema_filtered <= self.schmitt_threshold - self.schmitt_hysteresis:
-            self.schmitt_state = 0
+        if self.use_aad_filter:
+            # EMA smoother: dempt snelle schommelingen in de ruwe modelkans.
+            # Schmitt trigger: wisselt pas van kant als kans drempel ± hysterese overschrijdt.
+            # → Samen voorkomen ze flickering bij twijfelgevallen.
+            self.ema_filtered = self.ema_alpha * pred_prob + (1 - self.ema_alpha) * self.ema_filtered
+            if self.schmitt_state == 0 and self.ema_filtered >= self.schmitt_threshold + self.schmitt_hysteresis:
+                self.schmitt_state = 1
+            elif self.schmitt_state == 1 and self.ema_filtered <= self.schmitt_threshold - self.schmitt_hysteresis:
+                self.schmitt_state = 0
+            self.attended_left = (self.schmitt_state == 0)
+            queue_val = float(self.schmitt_state)
+        else:
+            # Geen filter: directe drempel op ruwe kans (gevoelig voor ruis)
+            # hoge pred_prob (≥0.5) = RIGHT → attended_left = False
+            self.attended_left = (pred_prob < 0.5)
+            self.ema_filtered  = pred_prob   # expose ruwe kans voor UI-plot
+            queue_val = 0.0 if self.attended_left else 1.0
 
-        # Update attended_left: server convention 0=left, 1=right
-        self.attended_left = (self.schmitt_state == 0)
+        # Gefilterd besluit bijhouden voor vergelijking in statistieken
+        self._stat_aad_filt_decisions.append(0.0 if self.attended_left else 1.0)
 
         return pred_prob
+
+    def print_statistics(self):
+        """Eindrapport — scorecard voor de huidige run."""
+        W    = 68
+        SEP  = "=" * W
+        SEP2 = "-" * W
+
+        # ────────────────────────────────────────────────────────────────────
+        print(f"\n{SEP}")
+        print(f"  EINDSTATISTIEKEN LIVE-RUN")
+        print(SEP)
+
+        # Filter configuratie
+        aad_cfg = (f"AAN  —  EMA α={self.ema_alpha},  Schmitt {self.schmitt_threshold} ± {self.schmitt_hysteresis}"
+                   if self.use_aad_filter else "UIT  —  drempel 0.5 op ruwe kans")
+        aad_audio = ("GSC-output  (beamformer, 16 kHz  — realistisch)"
+                     if self.use_gsc_audio_for_aad else
+                     "Clean speech  (stimuli, 48 kHz  — ideaal)")
+        if self.use_doa_filter:
+            doa_cfg = (f"AAN  —  Mediaan N={self.doa_filter_N}" if self.doa_filter_type == "median"
+                       else f"AAN  —  EMA α={self.doa_ema_alpha}")
+        else:
+            doa_cfg = "UIT  —  ruwe MUSIC"
+        vad_cfg = (f"AAN  —  α_up={self.alpha_up},  α_down={self.alpha_down},  thresh={self.vad_threshold}"
+                   if self.use_vad_filter else f"UIT  —  α_up={self.alpha_up},  α_down={self.alpha_down}")
+
+        print(f"  AAD-filter  :  {aad_cfg}")
+        print(f"  AAD-audio   :  {aad_audio}")
+        print(f"  DOA-filter  :  {doa_cfg}")
+        print(f"  VAD-filter  :  {vad_cfg}")
+
+        # ── DOA ─────────────────────────────────────────────────────────────
+        if self._stat_doa_left_filt:
+            fl  = np.array(self._stat_doa_left_filt)
+            fr  = np.array(self._stat_doa_right_filt)
+            jfl = np.abs(np.diff(fl))
+            jfr = np.abs(np.diff(fr))
+
+            # Ground truth MAE berekenen als gt.npz geladen is
+            has_doa_gt = False
+            if self._doa_gt_raw is not None:
+                try:
+                    n_hops = len(fl)
+                    gt = self._doa_gt_raw
+                    dur_l = np.diff(np.insert(gt["endSamples_l"], 0, 0))
+                    dur_r = np.diff(np.insert(gt["endSamples_r"], 0, 0))
+                    gl = np.concatenate([np.repeat(float(a), int(n)) for a, n in zip(gt["angles_l"], dur_l)])
+                    gr = np.concatenate([np.repeat(float(a), int(n)) for a, n in zip(gt["angles_r"], dur_r)])
+                    idx = np.minimum(np.arange(n_hops) * self.hop + self.hop // 2, len(gl) - 1)
+                    gt_l_hops = gl[idx]
+                    gt_r_hops = gr[idx]
+                    half_step = float(np.min(np.abs(np.diff(np.sort(self.lut_angles))))) / 2
+                    mae_l     = np.mean(np.abs(fl - gt_l_hops))
+                    mae_r     = np.mean(np.abs(fr - gt_r_hops))
+                    exact_l   = np.mean(np.abs(fl - gt_l_hops) <= half_step) * 100
+                    exact_r   = np.mean(np.abs(fr - gt_r_hops) <= half_step) * 100
+                    has_doa_gt = True
+                except Exception as e:
+                    print(f"  [WARN] DOA GT MAE mislukt: {e}")
+
+            print(f"\n{SEP}")
+            print(f"  DOA  —  {len(fl)} frames  (~{len(fl)*self.hop//self.fs} s)")
+            print(SEP2)
+            if has_doa_gt:
+                #          label    max-sprong  >10°-sprongen   MAE vs GT   % Exact GT
+                print(f"  {'':7}  {'Max sprong':>11}  {'>10° sprongen':>14}  {'MAE vs GT':>10}  {'% Exact GT':>11}")
+                print(SEP2)
+                print(f"  {'Links':<7}  {np.max(jfl):>10.1f}°  {np.sum(jfl>10):>13}x  {mae_l:>9.1f}°  {exact_l:>10.1f}%")
+                print(f"  {'Rechts':<7}  {np.max(jfr):>10.1f}°  {np.sum(jfr>10):>13}x  {mae_r:>9.1f}°  {exact_r:>10.1f}%")
+            else:
+                print(f"  {'':7}  {'Max sprong':>11}  {'>10° sprongen':>14}")
+                print(SEP2)
+                print(f"  {'Links':<7}  {np.max(jfl):>10.1f}°  {np.sum(jfl>10):>13}x")
+                print(f"  {'Rechts':<7}  {np.max(jfr):>10.1f}°  {np.sum(jfr>10):>13}x")
+                print(f"  (GT niet beschikbaar — start met reverberant data voor MAE)")
+
+        # ── SIR ─────────────────────────────────────────────────────────────
+        if self._stat_sir_left:
+            sl   = np.array(self._stat_sir_left)
+            sr   = np.array(self._stat_sir_right)
+            half = max(len(sl) // 2, 1)
+            tl   = np.mean(sl[half:]) - np.mean(sl[:half])
+            tr   = np.mean(sr[half:]) - np.mean(sr[:half])
+            att_l = self.attended_left
+            sa    = sl if att_l else sr
+            ta    = np.mean(sa[half:]) - np.mean(sa[:half])
+
+            print(f"\n{SEP}")
+            print(f"  SIR  —  {len(sl)} vensters × 1 s  (hogere SIR = betere scheiding)")
+            print(SEP2)
+            # label=7  Gem/Med/Min/Max: "{:>6.1f} dB"=9 chars  Trend: "{:>+7.1f} dB"=10 chars
+            print(f"  {'':7}  {'Gem':>9}  {'Med':>9}  {'Min':>9}  {'Max':>9}  {'Trend':>10}")
+            print(SEP2)
+            print(f"  {'Links':<7}  {np.mean(sl):>6.1f} dB  {np.median(sl):>6.1f} dB"
+                  f"  {np.min(sl):>6.1f} dB  {np.max(sl):>6.1f} dB  {tl:>+7.1f} dB")
+            print(f"  {'Rechts':<7}  {np.mean(sr):>6.1f} dB  {np.median(sr):>6.1f} dB"
+                  f"  {np.min(sr):>6.1f} dB  {np.max(sr):>6.1f} dB  {tr:>+7.1f} dB")
+            print(SEP2)
+            print(f"  Aandacht ({'Links' if att_l else 'Rechts'})  :  gem {np.mean(sa):>5.1f} dB  |  trend {ta:>+5.1f} dB")
+
+        # ── VAD ─────────────────────────────────────────────────────────────
+        vad_l = [v for v in self._stat_vad_left  if v is not None]
+        vad_r = [v for v in self._stat_vad_right if v is not None]
+        if vad_l:
+            vl = np.array(vad_l)
+            vr = np.array(vad_r)
+            print(f"\n{SEP}")
+            print(f"  VAD  —  {len(vl)} frames met GT-signalen")
+            print(SEP2)
+            #         label    % spraak    % GSC-update
+            print(f"  {'':7}  {'% Spraak':>9}  {'% GSC-update':>13}")
+            print(SEP2)
+            print(f"  {'Links':<7}  {np.mean(vl)*100:>8.1f}%  {(1-np.mean(vl))*100:>12.1f}%")
+            print(f"  {'Rechts':<7}  {np.mean(vr)*100:>8.1f}%  {(1-np.mean(vr))*100:>12.1f}%")
+
+        # ── AAD ─────────────────────────────────────────────────────────────
+        if self._stat_aad_filt_decisions:
+            fil      = np.array(self._stat_aad_filt_decisions)
+            sw       = int(np.sum(np.diff(fil) != 0))
+            n_win    = len(fil)
+            hop_s    = self._aad_hop_seconds
+            interval = n_win * hop_s / max(sw, 1)
+
+            hop_s = self._aad_hop_seconds
+            print(f"\n{SEP}")
+            print(f"  AAD  —  {n_win} inferenties  (venster 5 s,  stap {hop_s} s,  totaal ~{n_win*hop_s} s)")
+            print(SEP2)
+
+            # Accuracy t.o.v. GT attended speaker (als beschikbaar)
+            gt = np.array(self._stat_aad_gt_labels) if self._stat_aad_gt_labels else None
+            if gt is not None and len(gt) > 0:
+                n_acc = min(len(fil), len(gt))
+                accuracy = np.mean(fil[:n_acc] == gt[:n_acc]) * 100
+                print(f"  {'Accuracy':<16}:  {accuracy:.1f}%  (over {n_acc} vensters)")
+                print(f"  {'':16}   ↳ venster-accuracy: 1 beslissing vs majority-vote GT over {self._aad_hop_seconds*5} s")
+                print(f"  {'':16}   ↳ UI avg_accuracy : 1 beslissing vs elke GT-sample in de {self._aad_hop_seconds} s hop")
+                print(f"  {'':16}     (UI is lager bij sprekerswissels — gemengde GT-samples tellen mee)")
+
+            print(f"  {'Switches':<16}:  {sw:>4}x  (gem. elke {interval:.0f} s)")
+
+            if self._stat_aad_times_ms:
+                t = np.array(self._stat_aad_times_ms)
+                print(f"  {'Timing':<16}:  {np.mean(t):>4.0f} ms gem"
+                      f"  |  {np.median(t):>4.0f} ms med"
+                      f"  |  {np.min(t):>4.0f} ms min"
+                      f"  |  {np.max(t):>4.0f} ms max")
+                budget_ms = self._aad_hop_seconds * 1000
+                print(f"  {'Marge':<16}:  {budget_ms/np.mean(t):.1f}× (budget {budget_ms} ms / stap)")
+
+        print(f"\n{SEP}\n")

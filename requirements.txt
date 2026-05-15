@@ -4,3 +4,10 @@ matplotlib
 pyroomacoustics
 ipykernel
 soundfile
+brian2
+brian2hears
+tensorflow
+python-socketio
+uvicorn
+aiohttp
+librosa

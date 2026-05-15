@@ -11,12 +11,19 @@ Score: F1-score op spraakdetectie.
 Test op alle 15 pairs × 2 kanten (links/rechts) = 30 signalen.
 """
 
+# alpha_up      = 0.99
+ # alpha_down    = 0.9
+  # vad_threshold = 0.5
+
 import os
 import numpy as np
 from scipy.io import wavfile
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+# Zorg dat we vanuit deze directory werken, ongeacht waar het script gerund wordt
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 # ── Configuratie ─────────────────────────────────────────────────────────────
 ANEC_ROOT = "data/phase3_audioData/audiodata_batch_1/anechoic"
