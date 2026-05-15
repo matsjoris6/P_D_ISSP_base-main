@@ -5,7 +5,7 @@ from scipy.io import wavfile
 from scipy.io.wavfile import write
 from processor import Processor
 
-BASE_PATH = "data/phase3_audioData/audiodata_batch_1/anechoic"
+BASE_PATH = "data/phase3_audioData/audiodata_batch_1/reverberant"
 
 with open(f"{BASE_PATH}/params.pkl", "rb") as f:
     params = pickle.load(f)
@@ -22,7 +22,10 @@ doa_right_gt = np.concatenate([np.repeat(e, n) for e, n in zip(gt["angles_r"], d
 
 print(f"Sample rate: {fs} Hz, audio shape: {lma_audio.shape}, duur: {lma_audio.shape[0]/fs:.1f}s\n")
 
-proc = Processor()
+
+proc = Processor(rir_path="data/phase3_audioData/audiodata_batch_1/reverberant/lma_16kHz_200ms.npz")
+
+
 chunk_size = fs // 32
 
 all_sig0 = []
@@ -47,8 +50,8 @@ print(f"Verwerken van {n_frames} frames ({n_frames*chunk_size/fs:.1f}s audio)...
 # EEG (128 Hz) = 640 samples, 64 kanalen
 dummy_eeg = np.random.randn(640, 64) 
 # Audio (16000 Hz) = 80000 samples
-dummy_audio_L = np.random.randn(80000) 
-dummy_audio_R = np.random.randn(80000) 
+dummy_audio_L = np.random.randn(240000) 
+dummy_audio_R = np.random.randn(240000) 
 
 aad_uitvoeringen = 0
 #einde aad toevoeging

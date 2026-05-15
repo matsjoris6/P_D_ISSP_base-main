@@ -5,7 +5,7 @@ from scipy import signal
 import logging
 logging.getLogger('brian2').setLevel(logging.ERROR)
 import brian2
-brian2.prefs.codegen.target = 'cython'
+brian2.prefs.codegen.target = 'numpy'
 from brian2 import Hz, kHz
 from brian2hears import Sound, erbspace, Gammatone, Filterbank
 from math import gcd
@@ -28,17 +28,10 @@ def compute_sir(y, x1, x2, groundTruth):
         return np.nan
     return 10 * np.log10(target_var / interf_var)
 
-_LMA_COORDS = np.array([
-    [4.699999999999999, 2.2],
-    [4.699999999999999, 2.3000000000000003],
-    [4.699999999999999, 2.4],
-    [4.699999999999999, 2.5],
-    [4.699999999999999, 2.6],
-])
 
 
 
-_RIR_PATH = "data/phase3_audioData/audiodata_batch_1/anechoic/lma_16kHz.npz"
+
 def build_lut_for_target(target_rir, L=1024):
     """Bouwt FAS beamformer en Blocking matrix voor één RIR."""
     n_bins = L // 2 + 1
@@ -110,7 +103,7 @@ def preprocess_eeg(eeg_data, fs_in, fs_out=64, lowcut=1.0, highcut=32.0):
 
 
 class Processor:
-    def __init__(self, fs=16000, rir_path=_RIR_PATH):
+    def __init__(self, fs=16000, rir_path="data/phase3_audioData/audiodata_batch_1/anechoic/lma_16kHz.npz"):
         self.attended_left = 1
 
         # Output 'pipes'
@@ -120,9 +113,9 @@ class Processor:
 
         
         self.fs = fs
-        self.M = 5  # Aantal LMA microfoons
+        self.M = 5  # Aantal  microfoons
         self.L = 1024  # FFT Window size
-        self.beta = 0.85  
+        self.beta = 0.98
         self.c = 343.0
         self.Q = 2  # Aantal sprekers
         self.mu = 0.01  # NLMS stapgrootte
@@ -193,7 +186,19 @@ class Processor:
         self.aad_model = tf.keras.models.load_model(model_path)
         self.aad_window_samples = 5*64   # 5s × 64Hz
         self.eeg_fs_in = 128            # raw EEG sample rate
-        self.audio_fs_in = 48000        # raw audio sample rate 
+
+        # AAD input mode
+        self.use_beamformer_for_aad = False  # False = clean speech (oracle), True = beamformer output
+        if self.use_beamformer_for_aad:
+            self.audio_fs_in = 16000  # beamformer output is 16 kHz
+        else:
+            self.audio_fs_in = 48000  # clean stimuli zijn 48 kHz
+
+        # Ring buffer voor beamformer → AAD (5 seconden bij 16 kHz)
+        self.beamformer_buffer_max_samples = 5 * self.fs  # 80000 samples
+        self.beamformer_buffer_left = np.zeros(self.beamformer_buffer_max_samples, dtype=np.float32)
+        self.beamformer_buffer_right = np.zeros(self.beamformer_buffer_max_samples, dtype=np.float32)
+        self.beamformer_buffer_filled = 0  # hoeveel samples zijn al geschreven (tot max)
 
         # PRE-COMPUTING: RIR Steering Vectors & GSC Filters
         rir_data = np.load(rir_path)
@@ -234,7 +239,12 @@ class Processor:
         self.vad_update_count_left = 0
         self.vad_update_count_right = 0
         #EINDE TEST
- 
+
+        rir_data = np.load(rir_path)
+        print(f"[DEBUG] RIR loaded: {rir_path}")
+        print(f"[DEBUG] RIR shape: {rir_data['rirs'].shape}")
+        print(f"[DEBUG] M={self.M}, RIR mics={rir_data['rirs'].shape[1]}")
+     
     def _get_lut_for_angle(self, doa):
         """Pakt dichtstbijzijnde hoek uit de LUT."""
         closest_angle = self.lut_angles[np.argmin(np.abs(self.lut_angles - doa))]
@@ -471,6 +481,15 @@ class Processor:
                 (sig0_hop.astype(np.float32), sig1_hop.astype(np.float32),
                 angle_left, angle_right, sir)
             )
+
+            # Roll & schrijf nieuwe hop in ring buffer (efficiënt, geen reallocate)
+            self.beamformer_buffer_left = np.roll(self.beamformer_buffer_left, -self.hop)
+            self.beamformer_buffer_left[-self.hop:] = sig0_hop.astype(np.float32)
+            self.beamformer_buffer_right = np.roll(self.beamformer_buffer_right, -self.hop)
+            self.beamformer_buffer_right[-self.hop:] = sig1_hop.astype(np.float32)
+            self.beamformer_buffer_filled = min(self.beamformer_buffer_filled + self.hop, 
+                                                self.beamformer_buffer_max_samples)
+
             sig_out = sig0_hop if self.attended_left else sig1_hop
             speaker = 0 if self.attended_left else 1
             self.data_queue_phase3.put_nowait((speaker, sig_out.astype(np.float32)))
@@ -480,6 +499,17 @@ class Processor:
         eeg : (N_eeg, 64) at 128 Hz, ~5 seconden
         sig_left_clean, sig_right_clean : (N_audio,) at 16000 Hz, ~5 seconden
         """
+        # === BEAMFORMER MODE: overschrijf clean speech met eigen beamformer output ===
+        if self.use_beamformer_for_aad:
+            if self.beamformer_buffer_filled < self.beamformer_buffer_max_samples:
+                # Buffer nog niet vol → skip
+                self.data_queue_phase2.put_nowait(0.5)
+                return
+            sig_left_clean = self.beamformer_buffer_left.copy()
+            sig_right_clean = self.beamformer_buffer_right.copy()
+        # === EINDE BEAMFORMER MODE ===
+
+
         t0 = time.time()
         # Preprocessing 
         eeg_proc = preprocess_eeg(eeg, fs_in=self.eeg_fs_in, fs_out=64)

@@ -1,84 +1,107 @@
+"""
+VAD optimalisatie voor reverberant case.
+Test verschillende VAD threshold waarden en rapporteert:
+- NLMS update percentage (hoeveel % de filter leert)
+- SIR statistieken (kwaliteit van de beamformer output)
+
+Doel: vind de threshold die de hoogste SIR geeft met een gezond update percentage.
+"""
+import time
 import numpy as np
-import pickle
 from scipy.io import wavfile
-import matplotlib.pyplot as plt
 from processor import Processor
 
+# === CONFIG ===
 BASE_PATH = "data/phase3_audioData/audiodata_batch_1/anechoic"
-PAIR = 5
-DURATION_SECONDS = 120   
+RIR_PATH  = "data/phase3_audioData/audiodata_batch_1/anechoic/lma_16kHz.npz"
+PAIR = 1
+DURATION_SECONDS = 120
 
-# Laad data
+# VAD thresholds om te testen
+VAD_THRESHOLDS = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0]
+
+# === DATA LADEN ===
+print(f"Laden data voor pair{PAIR} ({DURATION_SECONDS}s anechoic)...")
 fs, lma_audio = wavfile.read(f"{BASE_PATH}/pair{PAIR}/mixture_LMA.wav")
-
-gt = np.load(f"{BASE_PATH}/pair{PAIR}/gt.npz")
-# Bereken de lengte (in samples) van elk interval, beginnend vanaf sample 0
-durations_l = np.diff(np.insert(gt["endSamples_l"], 0, 0))
-durations_r = np.diff(np.insert(gt["endSamples_r"], 0, 0))
-
-# Bouw de arrays nu met de juiste duraties
-doa_left_gt = np.concatenate([np.repeat(e, n) for e, n in zip(gt["angles_l"], durations_l)])
-doa_right_gt = np.concatenate([np.repeat(e, n) for e, n in zip(gt["angles_r"], durations_r)])
+_, lma_gt0   = wavfile.read(f"{BASE_PATH}/pair{PAIR}/leftSpeaker_LMA.wav")
+_, lma_gt1   = wavfile.read(f"{BASE_PATH}/pair{PAIR}/rightSpeaker_LMA.wav")
 
 n_samples = int(DURATION_SECONDS * fs)
 lma_audio = lma_audio[:n_samples]
+lma_gt0   = lma_gt0[:n_samples]
+lma_gt1   = lma_gt1[:n_samples]
 
-print(f"Verwerken: {DURATION_SECONDS}s audio = {n_samples} samples\n")
+chunk_size = fs // 32
+n_frames   = n_samples // chunk_size
+print(f"Sample rate: {fs} Hz | {n_frames} chunks van {chunk_size} samples\n")
 
-proc = Processor()
-chunk_size = fs // 32  # zelfde als server (500 samples)
+# === RESULTATEN PER THRESHOLD ===
+results = {}
 
-all_t, all_est_l, all_est_r, all_gt_l, all_gt_r = [], [], [], [], []
-n_frames = n_samples // chunk_size
+for threshold in VAD_THRESHOLDS:
+    print(f"--- Testen vad_threshold={threshold} ---")
 
-import time
-t_start = time.time()
+    proc = Processor(rir_path=RIR_PATH)
+    proc.vad_threshold = threshold
 
-for i in range(n_frames):
-    chunk = lma_audio[i * chunk_size : (i + 1) * chunk_size, :]
-    proc.processing_microarray(chunk)
+    sir_history = []
+    t_start = time.time()
 
-    while not proc.data_queue_phase1.empty():
-        _, _, angle_left, angle_right, _ = proc.data_queue_phase1.get_nowait()
-        mid = i * chunk_size + chunk_size // 2
-        all_t.append(mid / fs)
-        all_est_l.append(angle_left)
-        all_est_r.append(angle_right)
-        all_gt_l.append(doa_left_gt[mid])
-        all_gt_r.append(doa_right_gt[mid])
+    for i in range(n_frames):
+        chunk     = lma_audio[i * chunk_size : (i + 1) * chunk_size, :]
+        chunk_gt0 = lma_gt0  [i * chunk_size : (i + 1) * chunk_size, :]
+        chunk_gt1 = lma_gt1  [i * chunk_size : (i + 1) * chunk_size, :]
 
-print(f"Verwerkt in {time.time()-t_start:.1f}s\n")
+        proc.processing_microarray(chunk, chunk_gt0, chunk_gt1)
 
-all_t = np.array(all_t)
-all_est_l = np.array(all_est_l)
-all_est_r = np.array(all_est_r)
-all_gt_l = np.array(all_gt_l)
-all_gt_r = np.array(all_gt_r)
+        while not proc.data_queue_phase1.empty():
+            _, _, _, _, sir = proc.data_queue_phase1.get_nowait()
+            if sir != 0.0 and not np.isnan(sir):
+                sir_history.append(sir)
 
-mask = all_t > 1.0
-err_l = np.abs(all_est_l[mask] - all_gt_l[mask])
-err_r = np.abs(all_est_r[mask] - all_gt_r[mask])
+    elapsed = time.time() - t_start
+    sir_arr = np.array(sir_history) if sir_history else np.array([0.0])
 
-print(f"=== DOA Statistieken (na 1s convergentie) ===")
-print(f"Links:  gem={np.mean(err_l):5.2f}°, mediaan={np.median(err_l):5.2f}°, max={np.max(err_l):5.2f}°")
-print(f"Rechts: gem={np.mean(err_r):5.2f}°, mediaan={np.median(err_r):5.2f}°, max={np.max(err_r):5.2f}°")
+    # VAD statistieken
+    upd_l = (proc.vad_update_count_left  / proc.vad_evals * 100) if proc.vad_evals > 0 else 0
+    upd_r = (proc.vad_update_count_right / proc.vad_evals * 100) if proc.vad_evals > 0 else 0
 
-fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 8))
-ax1.plot(all_t, all_gt_l, 'g-', label='gt links', linewidth=2)
-ax1.plot(all_t, all_est_l, 'b-', label='est links', alpha=0.7)
-ax1.set_ylabel('DOA (°)'); ax1.legend(); ax1.grid()
-ax1.set_title(f'Links — gem fout: {np.mean(err_l):.1f}°')
+    results[threshold] = {
+        "upd_l":      upd_l,
+        "upd_r":      upd_r,
+        "sir_mean":   np.mean(sir_arr),
+        "sir_median": np.median(sir_arr),
+        "sir_std":    np.std(sir_arr),
+        "sir_pct_pos":   100 * np.mean(sir_arr > 0),
+        "sir_pct_5db":   100 * np.mean(sir_arr > 5),
+        "sir_pct_10db":  100 * np.mean(sir_arr > 10),
+        "sir_second_half": np.mean(sir_arr[len(sir_arr)//2:]) if len(sir_arr) > 1 else 0.0,
+        "n_sir":      len(sir_arr),
+        "elapsed":    elapsed,
+    }
 
-ax2.plot(all_t, all_gt_r, 'g-', label='gt rechts', linewidth=2)
-ax2.plot(all_t, all_est_r, 'b-', label='est rechts', alpha=0.7)
-ax2.set_ylabel('DOA (°)'); ax2.legend(); ax2.grid()
-ax2.set_title(f'Rechts — gem fout: {np.mean(err_r):.1f}°')
+    r = results[threshold]
+    print(f"  VAD: L={upd_l:.1f}% R={upd_r:.1f}% updaten (= filter leert tijdens stilte)")
+    print(f"  SIR: mean={r['sir_mean']:+.2f} dB | median={r['sir_median']:+.2f} dB | "
+          f">0dB={r['sir_pct_pos']:.0f}% | >5dB={r['sir_pct_5db']:.0f}% | "
+          f">10dB={r['sir_pct_10db']:.0f}%")
+    print(f"  SIR 2e helft (na convergentie): {r['sir_second_half']:+.2f} dB")
+    print(f"  Verwerkt in {elapsed:.1f}s\n")
 
-ax3.plot(all_t, np.abs(all_est_l - all_gt_l), 'r-', label='fout links')
-ax3.plot(all_t, np.abs(all_est_r - all_gt_r), 'b-', label='fout rechts')
-ax3.set_xlabel('Tijd (s)'); ax3.set_ylabel('|fout| (°)'); ax3.legend(); ax3.grid()
-ax3.set_ylim(0, 60)
+# === SAMENVATTINGSTABEL ===
+print("=" * 95)
+print(f"{'Thresh':>7} | {'Upd L%':>7} | {'Upd R%':>7} | "
+      f"{'Gem SIR':>8} | {'Med SIR':>8} | {'>0dB':>6} | {'>5dB':>6} | {'>10dB':>6} | {'2e helft':>9}")
+print("-" * 95)
+for t, r in results.items():
+    print(f"{t:>7.2f} | {r['upd_l']:>6.1f}% | {r['upd_r']:>6.1f}% | "
+          f"{r['sir_mean']:>+8.2f} | {r['sir_median']:>+8.2f} | "
+          f"{r['sir_pct_pos']:>5.0f}% | {r['sir_pct_5db']:>5.0f}% | "
+          f"{r['sir_pct_10db']:>5.0f}% | {r['sir_second_half']:>+9.2f}")
+print("=" * 95)
 
-plt.tight_layout()
-plt.savefig(f'doa_fast_pair{PAIR}.png', dpi=100)
-plt.show()
+# Beste threshold op basis van mediaan SIR (robuuster dan gemiddelde door uitschieters)
+best = max(results, key=lambda t: results[t]["sir_median"])
+print(f"\nBeste threshold op basis van mediaan SIR: {best}")
+print(f"  → Mediaan SIR: {results[best]['sir_median']:+.2f} dB")
+print(f"  → NLMS update: L={results[best]['upd_l']:.1f}% R={results[best]['upd_r']:.1f}%")
