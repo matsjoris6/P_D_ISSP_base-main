@@ -56,23 +56,38 @@ class Emitter:
         await sio.emit("gsc_data", data, namespace="/frontend")
 
     async def handle_intermediate_result2(self, sio, data):
-        num_mini_ticks = X_SCALE_FS * self.aad_window_size
-        num_labels = self.eeg_fs * self.aad_window_size
+        # Omdat we een Sliding Window gebruiken met een hop van 1 seconde,
+        # staat elke nieuwe update gelijk aan 1 seconde voortgang in de tijd (niet 5).
+        HOP_SIZE = 1 
 
+        num_mini_ticks = X_SCALE_FS * HOP_SIZE
+        num_labels = self.eeg_fs * HOP_SIZE
+
+        # Bereken de timestamps voor de X-as
         data["timestamps"] = [(self.phase2_tick * num_mini_ticks) + (i * num_mini_ticks / num_labels) for i in range(num_labels)]
         self.phase2_tick += 1
 
-        num_samples_window = self.eeg_fs * self.aad_window_size
+        # Haal exact 1 seconde aan ground truth data op om te vergelijken
+        num_samples_window = self.eeg_fs * HOP_SIZE
         data["attended_speaker"] = self.attended_speaker[:num_samples_window]
         del self.attended_speaker[:num_samples_window]
         num_samples_window = min(num_samples_window, len(data["attended_speaker"]))
 
+        # Bereken de accuracy
         correct_samples_window = sum(1 for i in range(num_samples_window) if data["attended_speaker"][i] == round(data["pred_prob"]))
         self.total += num_samples_window
         self.correct_total += correct_samples_window
 
-        data["accuracy"] = correct_samples_window / num_samples_window
-        data["avg_accuracy"] = self.correct_total / self.total
+        # Voorkom delen door nul als het einde bereikt is
+        if num_samples_window > 0:
+            data["accuracy"] = correct_samples_window / num_samples_window
+        else:
+            data["accuracy"] = 0
+
+        if self.total > 0:
+            data["avg_accuracy"] = self.correct_total / self.total
+        else:
+            data["avg_accuracy"] = 0
 
         await sio.emit("aad_data", data, namespace="/frontend")
 
