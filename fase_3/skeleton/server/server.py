@@ -17,7 +17,7 @@ class Emitter:
         self.aad_window_size = aad_window_size
 
         self.phase1_tick = 0
-        self.phase2_tick = 0
+        self.phase2_tick = aad_window_size-1
         self.phase3_tick = 0
 
         self.doa_gt = None
@@ -59,7 +59,11 @@ class Emitter:
         # Omdat we een Sliding Window gebruiken met een hop van 1 seconde,
         # staat elke nieuwe update gelijk aan 1 seconde voortgang in de tijd (niet 5).
         HOP_SIZE = 1 
-
+        # FIX: Als dit de allereerste AAD update is, gooi dan de eerste 4 seconden 
+        # aan Ground Truth weg. Hierdoor beoordelen we de HUIDIGE seconde.
+        if self.phase2_tick == self.aad_window_size - HOP_SIZE:
+            aanloop_samples = self.eeg_fs * (self.aad_window_size - HOP_SIZE)
+            del self.attended_speaker[:aanloop_samples]
         num_mini_ticks = X_SCALE_FS * HOP_SIZE
         num_labels = self.eeg_fs * HOP_SIZE
 
