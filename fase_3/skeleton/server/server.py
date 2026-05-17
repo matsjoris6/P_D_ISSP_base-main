@@ -17,7 +17,7 @@ class Emitter:
         self.aad_window_size = aad_window_size
 
         self.phase1_tick = 0
-        self.phase2_tick = aad_window_size-1
+        #self.phase2_tick = aad_window_size-1
         self.phase3_tick = 0
 
         self.doa_gt = None

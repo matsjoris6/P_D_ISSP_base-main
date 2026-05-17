@@ -113,13 +113,18 @@ class Processor:
 
         
         self.fs = fs
-        self.M = 5  # Aantal  microfoons
+        
         self.L = 1024  # FFT Window size
         self.beta = 0.98
         self.c = 343.0
         self.Q = 2  # Aantal sprekers
         self.mu = 0.01  # NLMS stapgrootte
 
+        rir_data = np.load(rir_path)
+        rirs = rir_data["rirs"]
+        doas = rir_data["thetas"]
+        self.M = rirs.shape[1]
+        print(f"[Processor] {self.M} microfoons gedetecteerd uit RIR")
         # Audio buffer voor de sliding window
         self.audio_buffer = np.zeros((self.L, self.M))
 
@@ -180,7 +185,7 @@ class Processor:
         # Fallback hoeken voor de "koude start" (als er nog niet gesproken is)
         self.last_angle_left = 135.0  
         self.last_angle_right = 45.0
-
+        self.peak_threshold = -12.0
         # AAD model laden (Phase 2 Dilated CNN, 5s window) 
         model_path = "models/generic_dilated_alle_proefpersonen_beste_pieter_3laag_5sec_VERVOLG.keras"
         self.aad_model = tf.keras.models.load_model(model_path)
@@ -204,10 +209,7 @@ class Processor:
         self.ema_alpha = 0.3
         self.ema_filtered = 0.5  # Start op 50% (volledige twijfel)
 
-        # PRE-COMPUTING: RIR Steering Vectors & GSC Filters
-        rir_data = np.load(rir_path)
-        rirs = rir_data["rirs"]   
-        doas = rir_data["thetas"] 
+
         
         self.lut_angles = np.array(doas)
         self.A_lut = np.zeros((self.num_bins, self.M, len(doas)), dtype=complex)
@@ -236,13 +238,15 @@ class Processor:
         self.noise_floor_right = None
         self.alpha_up = 0.95     # langzaam stijgen (noise floor groeit voorzichtig)
         self.alpha_down = 0.8    # snel dalen (snel reageren op stilte) eerst 0.5
-        self.vad_threshold = 0.5 # spraak = × noise floor
+        self.vad_threshold = 0.75 # spraak = × noise floor
 
         # VAD statistieken (per beam) ENKEL VOOR TEST
         self.vad_evals = 0
         self.vad_update_count_left = 0
         self.vad_update_count_right = 0
         #EINDE TEST
+        self.sir_history_left  = []
+        self.sir_history_right = []
 
         rir_data = np.load(rir_path)
         print(f"[DEBUG] RIR loaded: {rir_path}")
@@ -372,21 +376,17 @@ class Processor:
             spectrum_geom_db = 10 * np.log10(p_geom / np.max(p_geom))
             
             # Direct Mappen op de 20 hoeken (Geen find_peaks meer nodig)
-            PEAK_THRESHOLD = -12.0
-            
-            # Deel de 20 hoeken op in links en rechts
+            # Direct Mappen op de 20 hoeken 
             left_mask = self.lut_angles > 90
             right_mask = self.lut_angles <= 90
             
-            # np.where negeert de foute kant (-inf), argmax pakt simpelweg het hoogste punt
+            # Argmax pakt simpelweg het hoogste punt per kant
             best_left_idx = np.argmax(np.where(left_mask, spectrum_geom_db, -np.inf))
             best_right_idx = np.argmax(np.where(right_mask, spectrum_geom_db, -np.inf))
                 
-            # Check of de gevonden piek hard genoeg is (boven threshold)
-            if spectrum_geom_db[best_left_idx] > PEAK_THRESHOLD:
-                self.last_angle_left = self.lut_angles[best_left_idx]
-            if spectrum_geom_db[best_right_idx] > PEAK_THRESHOLD:
-                self.last_angle_right = self.lut_angles[best_right_idx]
+            # Accepteer altijd de sterkste locatie (geen threshold restricties meer)
+            self.last_angle_left = self.lut_angles[best_left_idx]
+            self.last_angle_right = self.lut_angles[best_right_idx]
 
             angle_left = self.last_angle_left
             angle_right = self.last_angle_right
@@ -469,6 +469,9 @@ class Processor:
                     self._last_sir = sir
                     self._last_sir_left = sir_left if not np.isnan(sir_left) else 0.0
                     self._last_sir_right = sir_right if not np.isnan(sir_right) else 0.0
+
+                    self.sir_history_left.append(self._last_sir_left)
+                    self.sir_history_right.append(self._last_sir_right)
 
                     self.sir_buf_y_left = []
                     self.sir_buf_y_right = []

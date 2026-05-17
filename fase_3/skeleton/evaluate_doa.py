@@ -12,8 +12,8 @@ from scipy.io import wavfile
 from processor import Processor
 
 # === CONFIG ===
-BASE_PATH = "data/phase3_audioData/audiodata_batch_1/anechoic"
-RIR_PATH  = "data/phase3_audioData/audiodata_batch_1/anechoic/lma_16kHz.npz"
+BASE_PATH = "data/phase3_audioData/audiodata_batch_1/reverberant"
+RIR_PATH  = "data/phase3_audioData/audiodata_batch_1/reverberant/lma_16kHz_200ms.npz"
 PAIR = 1
 DURATION_SECONDS = 120
 
@@ -21,7 +21,7 @@ DURATION_SECONDS = 120
 VAD_THRESHOLDS = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0]
 
 # === DATA LADEN ===
-print(f"Laden data voor pair{PAIR} ({DURATION_SECONDS}s anechoic)...")
+print(f"Laden data voor pair{PAIR} ({DURATION_SECONDS}s reverberant)...")
 fs, lma_audio = wavfile.read(f"{BASE_PATH}/pair{PAIR}/mixture_LMA.wav")
 _, lma_gt0   = wavfile.read(f"{BASE_PATH}/pair{PAIR}/leftSpeaker_LMA.wav")
 _, lma_gt1   = wavfile.read(f"{BASE_PATH}/pair{PAIR}/rightSpeaker_LMA.wav")
