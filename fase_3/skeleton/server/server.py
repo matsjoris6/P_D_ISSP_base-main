@@ -26,6 +26,11 @@ class Emitter:
         self.correct_total = 0
         self.total = 0
 
+        #Evaluatie-accumulatoren (eindscore)
+        self.doa_err_sum = 0.0      # som van absolute DOA-fouten (beide kanten samen)
+        self.doa_err_count = 0      # aantal DOA-foutmetingen
+        self.sir_60s_values = []    # SIR-waarden binnen de eerste 60 seconden
+
     async def emit_data(self, issp_data, sio, pair_no, subject_no):
         print(datetime.datetime.now().isoformat(), "Emitting data...")
         time_start = time.time()
@@ -44,6 +49,7 @@ class Emitter:
 
         await sio.emit("end_data", datetime.datetime.now().isoformat(), namespace="/worker")
         print(datetime.datetime.now().isoformat(), "End of data")
+        self.print_final_score()
 
     async def handle_intermediate_result1(self, sio, data):
         num_mini_ticks = X_SCALE_FS / self.update_rate
@@ -51,12 +57,26 @@ class Emitter:
         data["timestamps"] = [(self.phase1_tick * num_mini_ticks) + (i * num_mini_ticks / num_labels) for i in range(num_labels)]
         data["doa_gt_0"] = self.doa_gt[0][(self.phase1_tick + 1) * num_labels]
         data["doa_gt_1"] = self.doa_gt[1][(self.phase1_tick + 1) * num_labels]
+
+        # Evaluatie: DOA-fout accumuleren (absolute fout per kant)
+        err_left = abs(data["doa_left"] - data["doa_gt_0"])
+        err_right = abs(data["doa_right"] - data["doa_gt_1"])
+        self.doa_err_sum += err_left + err_right
+        self.doa_err_count += 2
+
+        # Evaluatie: SIR binnen de eerste 60 seconden verzamelen
+        current_time_sec = self.phase1_tick / self.update_rate
+        sir_val = data.get("sir", 0.0)
+        if current_time_sec < 60 and sir_val is not None and sir_val != 0.0:
+            self.sir_60s_values.append(sir_val)
+
+
         self.phase1_tick += 1
 
         await sio.emit("gsc_data", data, namespace="/frontend")
 
     async def handle_intermediate_result2(self, sio, data):
-        HOP_SIZE = 1 
+        HOP_SIZE = 4 
 
         # DE ABSOLUTE MASTER KLOK: We kijken hoe ver de audio (phase1) al is!
         current_time_sec = self.phase1_tick / self.update_rate
@@ -108,6 +128,33 @@ class Emitter:
 
         await sio.emit("out_data", data, namespace="/frontend")
 
+    def print_final_score(self):
+        print("\n" + "=" * 50)
+        print("        FINAL EVALUATION SCORE")
+        print("=" * 50)
+
+        #  Gemiddelde DOA-hoekfout
+        if self.doa_err_count > 0:
+            avg_doa_err = self.doa_err_sum / self.doa_err_count
+            print(f"  Average DOA error      : {avg_doa_err:.2f} deg")
+        else:
+            print("  Average DOA error      : n/a")
+
+        #  Gemiddelde AAD-accuracy
+        if self.total > 0:
+            avg_acc = self.correct_total / self.total
+            print(f"  Average AAD accuracy   : {avg_acc * 100:.1f} %")
+        else:
+            print("  Average AAD accuracy   : n/a")
+
+        #  SIR over de eerste 60 seconden
+        if len(self.sir_60s_values) > 0:
+            avg_sir = sum(self.sir_60s_values) / len(self.sir_60s_values)
+            print(f"  SIR (first 60s)        : {avg_sir:+.2f} dB")
+        else:
+            print("  SIR (first 60s)        : n/a")
+
+        print("=" * 50 + "\n")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

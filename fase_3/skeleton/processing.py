@@ -7,7 +7,7 @@ from processor import Processor
 
 WINDOW_SIZE_SECONDS = 5  # Adjust your window size.
 UPDATE_RATE = 32  # Corresponding to the server's update rate.
-HOP_SIZE_SECONDS = 1
+HOP_SIZE_SECONDS = 4
 WIN_CHUNKS = WINDOW_SIZE_SECONDS * UPDATE_RATE  # 160 chunks voor een vol venster
 HOP_CHUNKS = HOP_SIZE_SECONDS * UPDATE_RATE     # 32 chunks wachten voor de volgende update
 
@@ -16,9 +16,6 @@ aad_hop_counter = 0
 sio = socketio.AsyncClient()
 stop_event = asyncio.Event()
 
-
-data_queue = asyncio.Queue()
-# More queues?
 
 
 async def process_phase1(data):
@@ -128,8 +125,9 @@ async def on_data(data):
 @sio.on("end_data", namespace="/worker")
 async def on_end_data(data):
     # Request new data or end
-    pass
-
+    #pass
+    data_processor.save_output_audio("output_attended.wav")
+    stop_event.set()
 
 async def main(pair_no, subject_no):
     await sio.connect("http://localhost:8000", transports=["websocket"], namespaces=["/worker"])
@@ -146,20 +144,7 @@ async def main(pair_no, subject_no):
 
     await sio.disconnect()
 
-#DEBUG
-import time
-last_chunk_time = time.time()
 
-# @sio.on("data_event", namespace="/worker")
-# async def on_data(data):
-#     global last_chunk_time
-#     now = time.time()
-#     delta = (now - last_chunk_time) * 1000
-#     last_chunk_time = now
-#     if delta > 50:  # Normaal ~31 ms, alarm bij > 50 ms
-#         print(f"[WARNING] Slow chunk delivery: {delta:.1f} ms")
-#     await data_queue.put(data)
-#     await process_phase1(data)
 
 
 if __name__ == "__main__":

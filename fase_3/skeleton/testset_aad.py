@@ -15,11 +15,12 @@ from processor import preprocess_eeg
 # === CONFIG ===
 EEG_BASE       = "data/phase3_test/eeg_data"
 CACHE_FILE     = "data/phase3_test/envelope_cache.npz"
-MODEL_PATH     = "models/generic_dilated_alle_proefpersonen_beste_pieter_3laag_5sec_VERVOLG.keras"
+MODEL_PATH     = "models/generic_dilated_alle_proefpersonen_beste_pieter_3laag_5sec_50overlap.keras"
 OUTPUT_CSV     = "aad_results_phase3test.csv"
 
-WINDOW_SECONDS = 5
-HOP_SECONDS    = 1
+WINDOW_SECONDS = 10
+HOP_SECONDS    = 5
+LABEL_SECONDS  = 1
 EEG_FS         = 128
 AAD_FS         = 64
 
@@ -91,7 +92,7 @@ def test_one_subject(subject, eeg_path):
 
     window_aad = WINDOW_SECONDS * AAD_FS
     hop_aad    = HOP_SECONDS * AAD_FS
-    hop_eeg    = HOP_SECONDS * EEG_FS
+    label_eeg  = LABEL_SECONDS * EEG_FS
 
     n_max = min(eeg_full.shape[0], env_left_full.shape[0], env_right_full.shape[0])
     n_windows = (n_max - window_aad) // hop_aad + 1
@@ -100,7 +101,7 @@ def test_one_subject(subject, eeg_path):
     total   = 0
     preds, gts = [], []
 
-    ema_alpha = 0.3
+    ema_alpha = 0.8
     ema_filtered = 0.5
 
     for w in range(n_windows):
@@ -125,7 +126,7 @@ def test_one_subject(subject, eeg_path):
 
 
         eeg_end_orig = aad_end * (EEG_FS // AAD_FS)
-        gt_slice = attended[eeg_end_orig - hop_eeg:eeg_end_orig]
+        gt_slice = attended[eeg_end_orig - label_eeg : eeg_end_orig]
         gt_label = int(np.round(np.mean(gt_slice)))
 
         if pred_label == gt_label:

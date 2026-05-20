@@ -115,7 +115,7 @@ class Processor:
         self.fs = fs
         
         self.L = 1024  # FFT Window size
-        self.beta = 0.98
+        self.beta = 0.97
         self.c = 343.0
         self.Q = 2  # Aantal sprekers
         self.mu = 0.01  # NLMS stapgrootte
@@ -124,7 +124,7 @@ class Processor:
         rirs = rir_data["rirs"]
         doas = rir_data["thetas"]
         self.M = rirs.shape[1]
-        print(f"[Processor] {self.M} microfoons gedetecteerd uit RIR")
+        
         # Audio buffer voor de sliding window
         self.audio_buffer = np.zeros((self.L, self.M))
 
@@ -187,7 +187,7 @@ class Processor:
         self.last_angle_right = 45.0
         self.peak_threshold = -12.0
         # AAD model laden (Phase 2 Dilated CNN, 5s window) 
-        model_path = "models/generic_dilated_alle_proefpersonen_beste_pieter_3laag_5sec_VERVOLG.keras"
+        model_path = "models/generic_dilated_alle_proefpersonen_beste_pieter_3laag_5sec_50overlap.keras"
         self.aad_model = tf.keras.models.load_model(model_path)
         self.aad_window_samples = 5*64   # 5s × 64Hz
         self.eeg_fs_in = 128            # raw EEG sample rate
@@ -205,8 +205,10 @@ class Processor:
         self.beamformer_buffer_right = np.zeros(self.beamformer_buffer_max_samples, dtype=np.float32)
         self.beamformer_buffer_filled = 0  # hoeveel samples zijn al geschreven (tot max)
 
+        self.output_audio_chunks = []   # verzamelt finale output voor WAV-export
+
         # AAD EMA Filter parameters
-        self.ema_alpha = 0.3
+        self.ema_alpha = 0.8
         self.ema_filtered = 0.5  # Start op 50% (volledige twijfel)
 
 
@@ -240,18 +242,10 @@ class Processor:
         self.alpha_down = 0.8    # snel dalen (snel reageren op stilte) eerst 0.5
         self.vad_threshold = 0.75 # spraak = × noise floor
 
-        # VAD statistieken (per beam) ENKEL VOOR TEST
-        self.vad_evals = 0
-        self.vad_update_count_left = 0
-        self.vad_update_count_right = 0
-        #EINDE TEST
+    
         self.sir_history_left  = []
         self.sir_history_right = []
 
-        rir_data = np.load(rir_path)
-        print(f"[DEBUG] RIR loaded: {rir_path}")
-        print(f"[DEBUG] RIR shape: {rir_data['rirs'].shape}")
-        print(f"[DEBUG] M={self.M}, RIR mics={rir_data['rirs'].shape[1]}")
      
     def _get_lut_for_angle(self, doa):
         """Pakt dichtstbijzijnde hoek uit de LUT."""
@@ -341,14 +335,6 @@ class Processor:
             update_filter_left = not vad_left
             update_filter_right = not vad_right
         
-            # Statistieken bijhouden BEGIN TEST
-            self.vad_evals += 1
-            if update_filter_left:
-                self.vad_update_count_left += 1
-            if update_filter_right:
-                self.vad_update_count_right += 1    
-            #EINDE TEST
-
             #  Analysis: window + FFT
             windowed = self.audio_buffer * self.window[:, np.newaxis]
             frame_fft = np.fft.rfft(windowed, n=self.L, axis=0)
@@ -481,7 +467,7 @@ class Processor:
                     self.sir_buf_R_gt1 = []
                     self.sir_buf_count = 0
 
-                    print(f"  [SIR-1s] left={self._last_sir_left:.2f} dB, right={self._last_sir_right:.2f} dB, attended={'L' if self.attended_left else 'R'} -> {sir:.2f} dB")
+                    #print(f"  [SIR-1s] left={self._last_sir_left:.2f} dB, right={self._last_sir_right:.2f} dB, attended={'L' if self.attended_left else 'R'} -> {sir:.2f} dB")
 
             # Push output naar de queues (per hop)
             self.data_queue_phase1.put_nowait(
@@ -500,7 +486,7 @@ class Processor:
             sig_out = sig0_hop if self.attended_left else sig1_hop
             speaker = 0 if self.attended_left else 1
             self.data_queue_phase3.put_nowait((speaker, sig_out.astype(np.float32)))
-
+            self.output_audio_chunks.append(sig_out.astype(np.float32))   # voor WAV-export
     def processing_eeg_gt_audio(self, eeg, sig_left_clean, sig_right_clean):
         """
         eeg : (N_eeg, 64) at 128 Hz, ~5 seconden
@@ -543,12 +529,12 @@ class Processor:
         pred = self.aad_model([eeg_in, env1_in, env2_in], training=False) #gebruik model zelf als functie
         pred_prob =1.0-float(pred[0, 0])
         t4=time.time()
-        print(f"\n--- AAD Timing Breakdown ---")
-        print(f"EEG Preprocessing:   {(t1 - t0)*1000:.1f} ms")
-        print(f"Audio L Envelope:    {(t2 - t1)*1000:.1f} ms")
-        print(f"Audio R Envelope:    {(t3 - t2)*1000:.1f} ms")
-        print(f"Model Inference:     {(t4 - t3)*1000:.1f} ms")
-        print(f"TOTALE AAD TIJD:     {(t4 - t0)*1000:.1f} ms\n")
+        #print(f"\n--- AAD Timing Breakdown ---")
+        #print(f"EEG Preprocessing:   {(t1 - t0)*1000:.1f} ms")
+        #print(f"Audio L Envelope:    {(t2 - t1)*1000:.1f} ms")
+        #print(f"Audio R Envelope:    {(t3 - t2)*1000:.1f} ms")
+        #print(f"Model Inference:     {(t4 - t3)*1000:.1f} ms")
+        #print(f"TOTALE AAD TIJD:     {(t4 - t0)*1000:.1f} ms\n")
 
         #  EMA Filter toepassen (mengt de nieuwe voorspelling met de historie)
         self.ema_filtered = (self.ema_alpha * pred_prob) + ((1.0 - self.ema_alpha) * self.ema_filtered)
@@ -558,3 +544,15 @@ class Processor:
 
         #  Stuur de gefilterde kans naar de frontend voor een vloeiendere grafiek
         self.data_queue_phase2.put_nowait(self.ema_filtered)
+    
+    def save_output_audio(self, filename="output_attended.wav"):
+        import scipy.io.wavfile as wavfile
+        if not self.output_audio_chunks:
+            print("[save] Geen output audio om op te slaan.")
+            return
+        full = np.concatenate(self.output_audio_chunks)
+        peak = np.max(np.abs(full))
+        if peak > 1.0:
+            full = full / peak * 0.99
+        wavfile.write(filename, self.fs, (full * 32767).astype(np.int16))
+        print(f"[save] Output audio opgeslagen: {filename} ({len(full)/self.fs:.1f}s @ {self.fs} Hz)")
